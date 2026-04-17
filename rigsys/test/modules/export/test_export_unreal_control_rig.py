@@ -26,6 +26,10 @@ class _FakeMayaCmds:
         self.plugins = {"fbxmaya": False}
         self.selected = []
         self.fileCalls = []
+        self.nodeTypes = {
+            "|Rig|modules|M_Root_IKFK_blend": "blendColors",
+            "|Rig|modules|M_Root_IKFK_rev": "reverse",
+        }
 
         self.joints = [
             "|Rig|skeleton|M_Root_Base",
@@ -89,6 +93,19 @@ class _FakeMayaCmds:
                 "|Rig|modules|M_RootOffset_CTRL.visibility",
             ],
         }
+        self.connectionsByPlug = {
+            "|Rig|modules|M_Root_IKFK_blend.blender": ["|Rig|modules|M_Root_CTRL.IK_FK_Switch"],
+            "|Rig|modules|M_Root_IKFK_blend.color1": ["|Rig|skeleton|M_Root_Base.rotate"],
+            "|Rig|modules|M_Root_IKFK_blend.color2": ["|Rig|skeleton|M_Root_Offset.rotate"],
+            "|Rig|modules|M_Root_IKFK_blend.output": ["|Rig|skeleton|M_Result.rotate"],
+            "|Rig|modules|M_Root_CTRL.IK_FK_Switch": [
+                "|Rig|modules|M_Root_IKFK_blend.blender",
+                "|Rig|modules|M_FK_Grp.visibility",
+                "|Rig|modules|M_Root_IKFK_rev.input.inputX",
+            ],
+            "|Rig|modules|M_Root_IKFK_rev.outputX": ["|Rig|modules|M_IK_Grp.visibility"],
+            "|Rig|modules|M_Root_IKFK_rev.output.outputX": ["|Rig|modules|M_PV_Grp.visibility"],
+        }
         self.constraintData = {
             "|Rig|constraints|M_RootOffset_parentConstraint1": {
                 "type": "parentConstraint",
@@ -113,6 +130,20 @@ class _FakeMayaCmds:
             return list(self.joints)
         if nodeType == "transform" and args and args[0] == "*_CTRL":
             return list(self.controls)
+        if nodeType == "blendColors":
+            return ["|Rig|modules|M_Root_IKFK_blend"]
+        if nodeType == "reverse":
+            return ["|Rig|modules|M_Root_IKFK_rev"]
+        if nodeType in {
+            "condition",
+            "multiplyDivide",
+            "plusMinusAverage",
+            "multDoubleLinear",
+            "clamp",
+            "setRange",
+            "remapValue",
+        }:
+            return []
         if nodeType == "parentConstraint":
             return [path for path, info in self.constraintData.items() if info["type"] == "parentConstraint"]
         if nodeType == "pointConstraint":
@@ -202,7 +233,14 @@ class _FakeMayaCmds:
         return False
 
     def listConnections(self, node, c=False, p=False, s=False, d=False):
+        if c and p and s and not d:
+            return list(self.connectionsByNode.get(node, []))
+        if p and not c:
+            return list(self.connectionsByPlug.get(node, []))
         return list(self.connectionsByNode.get(node, []))
+
+    def nodeType(self, node):
+        return self.nodeTypes.get(node, "transform")
 
     def _queryConstraint(self, constraint, queryTargets=False, queryWeightAliases=False):
         info = self.constraintData.get(constraint)
@@ -289,7 +327,7 @@ def test_unreal_control_rig_export_writes_manifest_script_and_fbx(tmp_path, monk
     assert manifest["unreal"]["control_rig_name"] == "DemoRig_ControlRig"
     assert len(manifest["joints"]) == 2
     assert len(manifest["controls"]) == 2
-    assert manifest["schema_version"] == 2
+    assert manifest["schema_version"] == 3
     assert len(manifest["custom_control_attributes"]) == 1
     assert manifest["custom_control_attributes"][0]["attribute"] == "IK_FK_Switch"
     assert len(manifest["constraints"]) == 1

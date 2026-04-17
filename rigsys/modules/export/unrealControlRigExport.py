@@ -109,9 +109,11 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
 
         joints = self._collectJoints()
         controls = self._collectControls()
+        rigLogicNodes = self._collectRigLogicNodes()
+        ikFkSystems = self._collectIkFkSystems()
 
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "rig_name": self._rig.name,
             "maya_version": cmds.about(version=True),
             "maya_api_version": str(cmds.about(apiVersion=True)),
@@ -127,6 +129,8 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
             },
             "joints": joints,
             "controls": controls,
+            "rig_logic_nodes": rigLogicNodes,
+            "ik_fk_systems": ikFkSystems,
             "custom_control_attributes": self._collectCustomControlAttributes(controls),
             "constraints": self._collectConstraints(),
             "connections": self._collectConnections(joints=joints, controls=controls),
@@ -335,6 +339,159 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
                 )
 
         return data
+
+    def _collectRigLogicNodes(self) -> List[Dict]:
+        """Collect utility graph nodes commonly used for rig logic."""
+        supportedTypes = [
+            "blendColors",
+            "reverse",
+            "condition",
+            "multiplyDivide",
+            "plusMinusAverage",
+            "multDoubleLinear",
+            "clamp",
+            "setRange",
+            "remapValue",
+        ]
+
+        data = []
+        for nodeType in supportedTypes:
+            nodes = cmds.ls(type=nodeType, long=True) or []
+            for node in sorted(set(nodes)):
+                attrs = self._listNodeAttrs(node)
+                values = {}
+                for attr in attrs:
+                    plug = f"{node}.{attr}"
+                    value = self._safeGetAttrValue(plug)
+                    if isinstance(value, (int, float, str, bool)) or value is None:
+                        values[attr] = value
+                    elif isinstance(value, (list, tuple)):
+                        values[attr] = list(value)
+
+                data.append(
+                    {
+                        "name": self._shortName(node),
+                        "path": node,
+                        "type": nodeType,
+                        "values": values,
+                    }
+                )
+        return data
+
+    def _collectIkFkSystems(self) -> List[Dict]:
+        """Collect common Maya IK/FK blend patterns for Unreal reconstruction."""
+        blendNodes = cmds.ls(type="blendColors", long=True) or []
+        systemsBySwitch = {}
+
+        for blendNode in sorted(set(blendNodes)):
+            blenderSource = self._firstConnection(f"{blendNode}.blender", source=True, destination=False)
+            if blenderSource is None or not blenderSource.endswith(".IK_FK_Switch"):
+                continue
+
+            switchKey = blenderSource
+            switchControl = blenderSource.split(".", 1)[0]
+            system = systemsBySwitch.setdefault(
+                switchKey,
+                {
+                    "switch_attribute": self._shortPlug(blenderSource),
+                    "switch_control": self._shortName(switchControl),
+                    "blend_nodes": [],
+                    "visibility_targets": {
+                        "switch": [],
+                        "reverse": [],
+                    },
+                },
+            )
+
+            drivenDestination = self._firstConnection(f"{blendNode}.output", source=False, destination=True)
+            fkSource = self._firstConnection(f"{blendNode}.color1", source=True, destination=False)
+            ikSource = self._firstConnection(f"{blendNode}.color2", source=True, destination=False)
+
+            system["blend_nodes"].append(
+                {
+                    "node": self._shortName(blendNode),
+                    "driven": self._shortPlug(drivenDestination) if drivenDestination else None,
+                    "fk_source": self._shortPlug(fkSource) if fkSource else None,
+                    "ik_source": self._shortPlug(ikSource) if ikSource else None,
+                }
+            )
+
+        for switchKey, system in systemsBySwitch.items():
+            switchOutputs = self._listConnections(switchKey, source=False, destination=True, plugs=True)
+
+            reverseNodes = set()
+            for outPlug in switchOutputs:
+                if outPlug.endswith(".visibility"):
+                    system["visibility_targets"]["switch"].append(self._shortPlug(outPlug))
+
+                nodeName = self._plugNode(outPlug)
+                if nodeName and self._safeNodeType(nodeName) == "reverse":
+                    reverseNodes.add(nodeName)
+
+            for reverseNode in sorted(reverseNodes):
+                reverseOutputs = []
+                reverseOutputs.extend(
+                    self._listConnections(f"{reverseNode}.outputX", source=False, destination=True, plugs=True)
+                )
+                reverseOutputs.extend(
+                    self._listConnections(f"{reverseNode}.output.outputX", source=False, destination=True, plugs=True)
+                )
+                for reverseOutput in reverseOutputs:
+                    if reverseOutput.endswith(".visibility"):
+                        system["visibility_targets"]["reverse"].append(self._shortPlug(reverseOutput))
+
+            system["visibility_targets"]["switch"] = sorted(set(system["visibility_targets"]["switch"]))
+            system["visibility_targets"]["reverse"] = sorted(set(system["visibility_targets"]["reverse"]))
+
+        return sorted(systemsBySwitch.values(), key=lambda item: item["switch_attribute"])
+
+    def _listNodeAttrs(self, node: str) -> List[str]:
+        """Return list of node attrs if the Maya command is available."""
+        if not hasattr(cmds, "listAttr"):
+            return []
+        try:
+            attrs = cmds.listAttr(node, scalar=True, settable=True) or []
+            return [attr for attr in attrs if attr not in ("message",)]
+        except Exception:
+            return []
+
+    def _listConnections(self, plugOrNode: str, source: bool, destination: bool, plugs: bool = True) -> List[str]:
+        """Safe wrapper around cmds.listConnections."""
+        try:
+            return cmds.listConnections(plugOrNode, s=source, d=destination, p=plugs) or []
+        except Exception:
+            return []
+
+    def _firstConnection(self, plug: str, source: bool, destination: bool) -> Optional[str]:
+        """Get first connection from a plug for a given direction."""
+        connections = self._listConnections(plug, source=source, destination=destination, plugs=True)
+        if not connections:
+            return None
+        return connections[0]
+
+    def _plugNode(self, plug: str) -> Optional[str]:
+        """Return node name from plug notation."""
+        if not plug or "." not in plug:
+            return None
+        return plug.split(".", 1)[0]
+
+    def _shortPlug(self, plug: Optional[str]) -> Optional[str]:
+        """Return a short node.attr plug."""
+        if plug is None:
+            return None
+        if "." not in plug:
+            return self._shortName(plug)
+        node, attr = plug.split(".", 1)
+        return f"{self._shortName(node)}.{attr}"
+
+    def _safeNodeType(self, node: str) -> Optional[str]:
+        """Safely query Maya node type."""
+        if not hasattr(cmds, "nodeType"):
+            return None
+        try:
+            return cmds.nodeType(node)
+        except Exception:
+            return None
 
     def _safeGetAttrValue(self, plug: str):
         """Get Maya attribute value, handling scalar/list return conventions."""
@@ -665,6 +822,84 @@ def _apply_constraints(control_rig_bp, manifest):
         )
 
 
+def _apply_ik_fk_systems(control_rig_bp, manifest):
+    """Apply best-effort IK/FK behavior scaffolding."""
+    systems = manifest.get("ik_fk_systems", [])
+    if not systems:
+        return
+
+    supports_member_variables = hasattr(control_rig_bp, "add_member_variable")
+    if not supports_member_variables:
+        _log_warning("Control Rig blueprint has no add_member_variable; IK/FK vars will be metadata-only.")
+
+    for system in systems:
+        switch_attr = system.get("switch_attribute", "")
+        if not switch_attr:
+            continue
+
+        # We keep the naming deterministic so follow-up graph tools can find these vars.
+        variable_name = f"IKFK__{switch_attr}".replace(":", "_").replace("|", "_").replace(".", "_")
+        if supports_member_variables:
+            _try_call(
+                control_rig_bp.add_member_variable,
+                [
+                    ((variable_name, "float"), {}),
+                    ((variable_name, "float", "0.0"), {}),
+                    ((variable_name, "float", False, False, "0.0"), {}),
+                ],
+            )
+
+        # Visibility remaps require graph units in most UE versions; preserve as warnings + metadata.
+        switch_vis = system.get("visibility_targets", {}).get("switch", [])
+        reverse_vis = system.get("visibility_targets", {}).get("reverse", [])
+        if switch_vis or reverse_vis:
+            _log_warning(
+                "IK/FK visibility targets detected; graph-level wiring is required for full parity."
+            )
+
+
+def _apply_rig_logic_nodes(control_rig_bp, manifest):
+    """Apply best-effort rig-logic utility nodes as exposed variables."""
+    logic_nodes = manifest.get("rig_logic_nodes", [])
+    if not logic_nodes:
+        return
+
+    if not hasattr(control_rig_bp, "add_member_variable"):
+        _log_warning("Control Rig blueprint has no add_member_variable; rig-logic vars will be metadata-only.")
+        return
+
+    supported_variable_types = (int, float, bool, str)
+
+    for logic_node in logic_nodes:
+        node_name = logic_node.get("name", "LogicNode")
+        for attr_name, value in (logic_node.get("values") or {}).items():
+            if not isinstance(value, supported_variable_types):
+                continue
+
+            variable_name = f"Logic__{node_name}__{attr_name}"
+            variable_name = variable_name.replace(":", "_").replace("|", "_").replace(".", "_")
+
+            if isinstance(value, bool):
+                var_type = "bool"
+            elif isinstance(value, int):
+                var_type = "int32"
+            elif isinstance(value, float):
+                var_type = "float"
+            else:
+                var_type = "string"
+
+            default_literal = str(value).lower() if isinstance(value, bool) else str(value)
+
+            _try_call(
+                control_rig_bp.add_member_variable,
+                [
+                    ((variable_name, var_type), {}),
+                    ((variable_name, var_type, default_literal), {}),
+                    ((variable_name, var_type, False, False, default_literal), {}),
+                ],
+            )
+
+
 def _persist_metadata(control_rig_bp, manifest):
     """Save high-fidelity rig data as metadata for post-processing passes."""
     if not hasattr(unreal.EditorAssetLibrary, "set_metadata_tag"):
@@ -676,9 +911,13 @@ def _persist_metadata(control_rig_bp, manifest):
         "RigSys.ConstraintCount": str(len(manifest.get("constraints", []))),
         "RigSys.ConnectionCount": str(len(manifest.get("connections", []))),
         "RigSys.CustomAttributeCount": str(len(manifest.get("custom_control_attributes", []))),
+        "RigSys.RigLogicNodeCount": str(len(manifest.get("rig_logic_nodes", []))),
+        "RigSys.IkFkSystemCount": str(len(manifest.get("ik_fk_systems", []))),
         "RigSys.ConstraintsJSON": json.dumps(manifest.get("constraints", [])),
         "RigSys.ConnectionsJSON": json.dumps(manifest.get("connections", [])),
         "RigSys.CustomAttributesJSON": json.dumps(manifest.get("custom_control_attributes", [])),
+        "RigSys.RigLogicNodesJSON": json.dumps(manifest.get("rig_logic_nodes", [])),
+        "RigSys.IkFkSystemsJSON": json.dumps(manifest.get("ik_fk_systems", [])),
     }
 
     for key, value in metadata_payloads.items():
@@ -695,6 +934,8 @@ def main():
     _populate_hierarchy(control_rig_bp, manifest)
     _apply_custom_attributes(control_rig_bp, manifest)
     _apply_constraints(control_rig_bp, manifest)
+    _apply_ik_fk_systems(control_rig_bp, manifest)
+    _apply_rig_logic_nodes(control_rig_bp, manifest)
     _persist_metadata(control_rig_bp, manifest)
     unreal.EditorAssetLibrary.save_loaded_asset(control_rig_bp)
     unreal.log("[Rig.Sys] Unreal Control Rig generation complete.")
