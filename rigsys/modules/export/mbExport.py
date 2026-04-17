@@ -14,9 +14,16 @@ class MBExport(exportBase.ExportModuleBase):
                  isMuted: bool = False, exportAll: bool = False, exportSelected: bool = False,
                  nodesToExport: list = None, mirror: bool = False) -> None:
         """Initialize the module."""
-        super().__init__(rig, exportPath, label, buildOrder, isMuted, mirror)
-
-        self.extension = ".mb"
+        super().__init__(
+            rig,
+            exportPath,
+            label,
+            buildOrder,
+            isMuted,
+            mirror,
+            extension=".mb",
+            fileNameSuffix="_MB",
+        )
 
         self.exportAll = exportAll
         self.exportSelected = exportSelected

@@ -25,9 +25,16 @@ class FBXExport(exportBase.ExportModuleBase):
             exportSelected {bool} -- Export only selected?
             nodesToExport {list} -- List of nodes to export (if exportSelected is True)
         """
-        super().__init__(rig, exportPath, label, buildOrder, isMuted, mirror)
-
-        self.extension = ".fbx"
+        super().__init__(
+            rig,
+            exportPath,
+            label,
+            buildOrder,
+            isMuted,
+            mirror,
+            extension=".fbx",
+            fileNameSuffix="_FBX",
+        )
 
         self.exportAll = exportAll
         self.exportSelected = exportSelected

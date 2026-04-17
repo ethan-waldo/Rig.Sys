@@ -93,6 +93,15 @@ class ExampleCharacter(api_rig.Rig):
             #     exportSelected=False,
             #     nodesToExport=None,
             # ),
+            # "UnrealControlRigExport": export.UnrealControlRigExport(
+            #     self,
+            #     exportPath=os.path.join(self.exampleCharacterFolder, "exports"),
+            #     exportFBX=True,
+            #     exportAll=True,
+            #     createUnrealScript=True,
+            #     controlRigPackagePath="/Game/Characters/Rigs",
+            #     controlRigName="ExampleRig_ControlRig",
+            # ),
         }
 
 

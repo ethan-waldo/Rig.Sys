@@ -16,6 +16,43 @@ Modular rigging system for Autodesk Maya.
 Characters are stored as Python files that subclass from the `Character` class. Data such as proxy translations and skin
 weights are stored in JSON files.
 
+## Maya + Python compatibility
+
+Rig.Sys now targets modern Maya Python runtimes (`python>=3.10`), which aligns with current Maya releases.
+
+## Exporting Maya rigs to Unreal Control Rig
+
+Rig.Sys includes an `UnrealControlRigExport` module that writes:
+
+- A rig manifest (`.json`) with joints, controls, hierarchy, and transforms.
+- An FBX file (optional).
+- A generated Unreal Python script (`.py`) that uses Unreal scripting APIs to:
+  - import the FBX as skeletal content, and
+  - create and populate a Control Rig asset.
+
+Example:
+
+```python
+import os
+
+import rigsys.modules.export as export
+
+self.exportModules = {
+    "UnrealControlRigExport": export.UnrealControlRigExport(
+        self,
+        exportPath=os.path.join(self.exampleCharacterFolder, "exports"),
+        exportFBX=True,
+        exportAll=True,
+        createUnrealScript=True,
+        controlRigPackagePath="/Game/Characters/Rigs",
+        controlRigName="ExampleRig_ControlRig",
+        skeletalMeshImportPath="/Game/Characters/Meshes",
+    )
+}
+```
+
+Then in Unreal, run the generated Python script in the Unreal Python console/editor to create the Control Rig asset.
+
 ## Motion module parenting
 
 Motion modules can be parented to other motion modules. This is done by setting the `parent` attribute on the module to the name of the parent module. If the name of the parent module is not found, an error will be raised when the character is built.
