@@ -112,8 +112,13 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
         rigLogicNodes = self._collectRigLogicNodes()
         ikFkSystems = self._collectIkFkSystems()
 
+        rigVmInstructions = self._buildRigVmInstructions(
+            ikFkSystems=ikFkSystems,
+            rigLogicNodes=rigLogicNodes,
+        )
+
         return {
-            "schema_version": 3,
+            "schema_version": 4,
             "rig_name": self._rig.name,
             "maya_version": cmds.about(version=True),
             "maya_api_version": str(cmds.about(apiVersion=True)),
@@ -131,6 +136,7 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
             "controls": controls,
             "rig_logic_nodes": rigLogicNodes,
             "ik_fk_systems": ikFkSystems,
+            "rigvm_instructions": rigVmInstructions,
             "custom_control_attributes": self._collectCustomControlAttributes(controls),
             "constraints": self._collectConstraints(),
             "connections": self._collectConnections(joints=joints, controls=controls),
@@ -393,6 +399,7 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
             system = systemsBySwitch.setdefault(
                 switchKey,
                 {
+                    "switch_attribute_path": blenderSource,
                     "switch_attribute": self._shortPlug(blenderSource),
                     "switch_control": self._shortName(switchControl),
                     "blend_nodes": [],
@@ -444,6 +451,60 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
             system["visibility_targets"]["reverse"] = sorted(set(system["visibility_targets"]["reverse"]))
 
         return sorted(systemsBySwitch.values(), key=lambda item: item["switch_attribute"])
+
+    def _buildRigVmInstructions(self, ikFkSystems: List[Dict], rigLogicNodes: List[Dict]) -> List[Dict]:
+        """Build generic RigVM instruction payloads for Unreal graph reconstruction."""
+        instructions = []
+
+        for system in ikFkSystems:
+            switchAttr = system.get("switch_attribute")
+            switchControl = system.get("switch_control")
+            for blendNode in system.get("blend_nodes", []):
+                if not blendNode.get("driven"):
+                    continue
+                instructions.append(
+                    {
+                        "type": "ik_fk_blend",
+                        "switch_attribute": switchAttr,
+                        "switch_control": switchControl,
+                        "driven": blendNode.get("driven"),
+                        "fk_source": blendNode.get("fk_source"),
+                        "ik_source": blendNode.get("ik_source"),
+                    }
+                )
+
+            visibilityTargets = system.get("visibility_targets", {})
+            switchVisibility = visibilityTargets.get("switch", [])
+            reverseVisibility = visibilityTargets.get("reverse", [])
+            if switchVisibility or reverseVisibility:
+                instructions.append(
+                    {
+                        "type": "ik_fk_visibility_switch",
+                        "switch_attribute": switchAttr,
+                        "switch_control": switchControl,
+                        "switch_visible_targets": switchVisibility,
+                        "reverse_visible_targets": reverseVisibility,
+                    }
+                )
+
+        for logicNode in rigLogicNodes:
+            nodeName = logicNode.get("name")
+            nodeType = logicNode.get("type")
+            values = logicNode.get("values", {})
+            for attrName, value in values.items():
+                if not isinstance(value, (int, float, bool, str)):
+                    continue
+                instructions.append(
+                    {
+                        "type": "logic_constant",
+                        "node": nodeName,
+                        "node_type": nodeType,
+                        "attribute": attrName,
+                        "value": value,
+                    }
+                )
+
+        return instructions
 
     def _listNodeAttrs(self, node: str) -> List[str]:
         """Return list of node attrs if the Maya command is available."""
@@ -832,6 +893,10 @@ def _apply_ik_fk_systems(control_rig_bp, manifest):
     if not supports_member_variables:
         _log_warning("Control Rig blueprint has no add_member_variable; IK/FK vars will be metadata-only.")
 
+    hierarchy = None
+    if hasattr(control_rig_bp, "get_hierarchy_controller"):
+        hierarchy = control_rig_bp.get_hierarchy_controller()
+
     for system in systems:
         switch_attr = system.get("switch_attribute", "")
         if not switch_attr:
@@ -849,9 +914,18 @@ def _apply_ik_fk_systems(control_rig_bp, manifest):
                 ],
             )
 
-        # Visibility remaps require graph units in most UE versions; preserve as warnings + metadata.
+        switch_default = _get_ik_fk_switch_default(manifest, switch_attr)
+        switch_visible_default = switch_default >= 0.5
+
+        # Visibility remaps require graph units in most UE versions; apply hierarchy visibility if exposed.
         switch_vis = system.get("visibility_targets", {}).get("switch", [])
         reverse_vis = system.get("visibility_targets", {}).get("reverse", [])
+        if hierarchy is not None and (switch_vis or reverse_vis):
+            for target in switch_vis:
+                _set_hierarchy_visibility(hierarchy, _plug_to_node(target), switch_visible_default)
+            for target in reverse_vis:
+                _set_hierarchy_visibility(hierarchy, _plug_to_node(target), not switch_visible_default)
+
         if switch_vis or reverse_vis:
             _log_warning(
                 "IK/FK visibility targets detected; graph-level wiring is required for full parity."
@@ -900,6 +974,94 @@ def _apply_rig_logic_nodes(control_rig_bp, manifest):
             )
 
 
+def _apply_rigvm_instructions(control_rig_bp, manifest):
+    """Inject generic instruction nodes into RigVM graph when controller APIs are available."""
+    instructions = manifest.get("rigvm_instructions", [])
+    if not instructions:
+        return
+
+    controller = None
+    if hasattr(control_rig_bp, "get_controller_by_name"):
+        for controller_name in ("RigVMModel", "Rig Graph", "RigVM"):
+            try:
+                controller = control_rig_bp.get_controller_by_name(controller_name)
+            except Exception:
+                controller = None
+            if controller is not None:
+                break
+    if controller is None and hasattr(control_rig_bp, "get_controller"):
+        try:
+            controller = control_rig_bp.get_controller()
+        except Exception:
+            controller = None
+
+    if controller is None:
+        _log_warning("RigVM controller API not available; rigvm_instructions kept as metadata.")
+        return
+
+    if not hasattr(controller, "add_comment_node"):
+        _log_warning("RigVM controller lacks add_comment_node; rigvm_instructions kept as metadata.")
+        return
+
+    for index, instruction in enumerate(instructions):
+        payload = json.dumps(instruction, sort_keys=True)
+        position = unreal.Vector2D(float(index) * 12.0, 0.0)
+        _try_call(
+            controller.add_comment_node,
+            [
+                ((payload, position, unreal.Vector2D(620.0, 70.0)), {}),
+                ((payload, position), {}),
+                ((payload,), {}),
+            ],
+        )
+
+
+def _plug_to_node(plug):
+    if not plug or "." not in plug:
+        return plug
+    return plug.split(".", 1)[0]
+
+
+def _get_ik_fk_switch_default(manifest, switch_attribute):
+    custom_attrs = manifest.get("custom_control_attributes", [])
+    for attr in custom_attrs:
+        composed = f"{attr.get('control', '')}.{attr.get('attribute', '')}"
+        if composed != switch_attribute:
+            continue
+        value = attr.get("value")
+        if isinstance(value, (float, int)):
+            return float(value)
+        default = attr.get("default")
+        if isinstance(default, (float, int)):
+            return float(default)
+    return 0.0
+
+
+def _set_hierarchy_visibility(hierarchy, node_name, is_visible):
+    if not node_name:
+        return
+
+    if hasattr(hierarchy, "set_control_visibility"):
+        _try_call(
+            hierarchy.set_control_visibility,
+            [
+                ((node_name, is_visible), {"setup_undo": False}),
+                ((node_name, is_visible), {}),
+            ],
+        )
+        return
+
+    if hasattr(hierarchy, "set_visible"):
+        _try_call(
+            hierarchy.set_visible,
+            [
+                ((node_name, is_visible), {"setup_undo": False}),
+                ((node_name, is_visible), {}),
+            ],
+        )
+        return
+
+
 def _persist_metadata(control_rig_bp, manifest):
     """Save high-fidelity rig data as metadata for post-processing passes."""
     if not hasattr(unreal.EditorAssetLibrary, "set_metadata_tag"):
@@ -913,11 +1075,13 @@ def _persist_metadata(control_rig_bp, manifest):
         "RigSys.CustomAttributeCount": str(len(manifest.get("custom_control_attributes", []))),
         "RigSys.RigLogicNodeCount": str(len(manifest.get("rig_logic_nodes", []))),
         "RigSys.IkFkSystemCount": str(len(manifest.get("ik_fk_systems", []))),
+        "RigSys.RigVMInstructionCount": str(len(manifest.get("rigvm_instructions", []))),
         "RigSys.ConstraintsJSON": json.dumps(manifest.get("constraints", [])),
         "RigSys.ConnectionsJSON": json.dumps(manifest.get("connections", [])),
         "RigSys.CustomAttributesJSON": json.dumps(manifest.get("custom_control_attributes", [])),
         "RigSys.RigLogicNodesJSON": json.dumps(manifest.get("rig_logic_nodes", [])),
         "RigSys.IkFkSystemsJSON": json.dumps(manifest.get("ik_fk_systems", [])),
+        "RigSys.RigVMInstructionsJSON": json.dumps(manifest.get("rigvm_instructions", [])),
     }
 
     for key, value in metadata_payloads.items():
@@ -936,6 +1100,7 @@ def main():
     _apply_constraints(control_rig_bp, manifest)
     _apply_ik_fk_systems(control_rig_bp, manifest)
     _apply_rig_logic_nodes(control_rig_bp, manifest)
+    _apply_rigvm_instructions(control_rig_bp, manifest)
     _persist_metadata(control_rig_bp, manifest)
     unreal.EditorAssetLibrary.save_loaded_asset(control_rig_bp)
     unreal.log("[Rig.Sys] Unreal Control Rig generation complete.")

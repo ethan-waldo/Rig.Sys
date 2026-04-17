@@ -61,6 +61,7 @@ Current parity pipeline behavior:
 - Applies best-effort parent-constraint parenting reconstruction.
 - Detects common IK/FK blend + visibility switch systems and stores them as structured metadata for iterative graph reconstruction passes.
 - Persists high-fidelity rig metadata (`constraints`, `connections`, `rig_logic_nodes`, `ik_fk_systems`) onto the generated asset metadata for post-processing tooling.
+- Emits generic `rigvm_instructions` and applies best-effort RigVM graph comments + IK/FK visibility defaults in Unreal when compatible APIs are available.
 
 ## Motion module parenting
 

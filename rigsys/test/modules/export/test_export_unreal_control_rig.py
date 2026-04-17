@@ -86,6 +86,26 @@ class _FakeMayaCmds:
                 "max": 1.0,
                 "default": 0.0,
             },
+            "|Rig|modules|M_Root_IKFK_blend.blender": {
+                "type": "float",
+                "value": 0.25,
+                "keyable": False,
+                "channelBox": False,
+                "lock": False,
+                "default": 0.0,
+            },
+            "|Rig|modules|M_Root_IKFK_rev.inputX": {
+                "type": "float",
+                "value": 0.25,
+                "keyable": False,
+                "channelBox": False,
+                "lock": False,
+                "default": 0.0,
+            },
+        }
+        self.logicNodeAttrs = {
+            "|Rig|modules|M_Root_IKFK_blend": ["blender"],
+            "|Rig|modules|M_Root_IKFK_rev": ["inputX"],
         }
         self.connectionsByNode = {
             "|Rig|modules|M_Root_CTRL": [
@@ -189,9 +209,11 @@ class _FakeMayaCmds:
         self.fileCalls.append((filePath, kwargs))
         return filePath
 
-    def listAttr(self, node, userDefined=False):
+    def listAttr(self, node, userDefined=False, scalar=False, settable=False):
         if userDefined:
             return list(self.userAttrs.get(node, []))
+        if scalar and settable:
+            return list(self.logicNodeAttrs.get(node, []))
         return []
 
     def getAttr(self, plug, type=False, keyable=False, channelBox=False, lock=False):
@@ -327,7 +349,7 @@ def test_unreal_control_rig_export_writes_manifest_script_and_fbx(tmp_path, monk
     assert manifest["unreal"]["control_rig_name"] == "DemoRig_ControlRig"
     assert len(manifest["joints"]) == 2
     assert len(manifest["controls"]) == 2
-    assert manifest["schema_version"] == 3
+    assert manifest["schema_version"] == 4
     assert len(manifest["custom_control_attributes"]) == 1
     assert manifest["custom_control_attributes"][0]["attribute"] == "IK_FK_Switch"
     assert len(manifest["constraints"]) == 1
@@ -335,9 +357,17 @@ def test_unreal_control_rig_export_writes_manifest_script_and_fbx(tmp_path, monk
     assert len(manifest["connections"]) == 1
     assert manifest["connections"][0]["destination"].endswith(".visibility")
     assert manifest["connections"][0]["source"].endswith(".visibility")
+    assert len(manifest["rig_logic_nodes"]) == 2
+    assert len(manifest["ik_fk_systems"]) == 1
+    assert manifest["ik_fk_systems"][0]["switch_attribute"] == "M_Root_CTRL.IK_FK_Switch"
+    assert len(manifest["rigvm_instructions"]) >= 4
 
     scriptText = scriptPath.read_text(encoding="utf-8")
     assert "ControlRigBlueprintFactory" in scriptText
     assert "_apply_custom_attributes" in scriptText
     assert "_apply_constraints" in scriptText
+    assert "_apply_ik_fk_systems" in scriptText
+    assert "_apply_rig_logic_nodes" in scriptText
+    assert "_apply_rigvm_instructions" in scriptText
+    assert "RigSys.RigVMInstructionsJSON" in scriptText
     assert str(manifestPath) in scriptText
