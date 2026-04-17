@@ -25,10 +25,13 @@ Rig.Sys now targets modern Maya Python runtimes (`python>=3.10`), which aligns w
 Rig.Sys includes an `UnrealControlRigExport` module that writes:
 
 - A rig manifest (`.json`) with joints, controls, hierarchy, and transforms.
+- Constraint metadata, connection metadata, and user-defined control attributes for parity-oriented reconstruction passes.
 - An FBX file (optional).
 - A generated Unreal Python script (`.py`) that uses Unreal scripting APIs to:
   - import the FBX as skeletal content, and
-  - create and populate a Control Rig asset.
+  - create and populate a Control Rig asset,
+  - attempt best-effort parent-constraint reconstruction, and
+  - mirror custom control attributes as Control Rig member variables when supported by the installed Unreal API.
 
 Example:
 

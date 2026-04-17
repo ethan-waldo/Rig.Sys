@@ -107,8 +107,11 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
         if packagePath == "":
             packagePath = "/Game"
 
+        joints = self._collectJoints()
+        controls = self._collectControls()
+
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "rig_name": self._rig.name,
             "maya_version": cmds.about(version=True),
             "maya_api_version": str(cmds.about(apiVersion=True)),
@@ -122,8 +125,11 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
                 "control_rig_name": self.controlRigName,
                 "skeletal_mesh_import_path": self.skeletalMeshImportPath or packagePath,
             },
-            "joints": self._collectJoints(),
-            "controls": self._collectControls(),
+            "joints": joints,
+            "controls": controls,
+            "custom_control_attributes": self._collectCustomControlAttributes(controls),
+            "constraints": self._collectConstraints(),
+            "connections": self._collectConnections(joints=joints, controls=controls),
         }
 
     def _collectJoints(self) -> List[Dict]:
@@ -174,6 +180,190 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
             "rotation": cmds.xform(node, q=True, ws=True, ro=True),
             "scale": cmds.xform(node, q=True, r=True, s=True),
         }
+
+    def _collectCustomControlAttributes(self, controls: List[Dict]) -> List[Dict]:
+        """Collect user-defined custom attributes on controls for parity reconstruction."""
+        data = []
+        for control in controls:
+            controlPath = control["path"]
+            controlName = control["name"]
+            userAttrs = cmds.listAttr(controlPath, userDefined=True) or []
+            for attr in sorted(set(userAttrs)):
+                plug = f"{controlPath}.{attr}"
+
+                try:
+                    attrType = cmds.getAttr(plug, type=True)
+                except Exception:
+                    continue
+
+                if attrType in ("message", "TdataCompound", "compound"):
+                    continue
+
+                attrData = {
+                    "control": controlName,
+                    "control_path": controlPath,
+                    "attribute": attr,
+                    "type": attrType,
+                    "value": self._safeGetAttrValue(plug),
+                    "keyable": self._safeGetAttrState(plug, "keyable"),
+                    "channel_box": self._safeGetAttrState(plug, "channelBox"),
+                    "locked": self._safeGetAttrState(plug, "lock"),
+                    "min": None,
+                    "max": None,
+                    "default": None,
+                    "enum": None,
+                }
+
+                try:
+                    if cmds.attributeQuery(attr, node=controlPath, minExists=True):
+                        minimum = cmds.attributeQuery(attr, node=controlPath, minimum=True) or []
+                        if minimum:
+                            attrData["min"] = minimum[0]
+                except Exception:
+                    pass
+
+                try:
+                    if cmds.attributeQuery(attr, node=controlPath, maxExists=True):
+                        maximum = cmds.attributeQuery(attr, node=controlPath, maximum=True) or []
+                        if maximum:
+                            attrData["max"] = maximum[0]
+                except Exception:
+                    pass
+
+                try:
+                    defaultValue = cmds.attributeQuery(attr, node=controlPath, listDefault=True) or []
+                    if defaultValue:
+                        attrData["default"] = defaultValue[0]
+                except Exception:
+                    pass
+
+                try:
+                    enumNames = cmds.attributeQuery(attr, node=controlPath, listEnum=True) or []
+                    if enumNames:
+                        attrData["enum"] = enumNames[0]
+                except Exception:
+                    pass
+
+                data.append(attrData)
+
+        return data
+
+    def _collectConstraints(self) -> List[Dict]:
+        """Collect supported Maya constraints for Unreal reconstruction attempts."""
+        constraintTypes = {
+            "parentConstraint": cmds.parentConstraint,
+            "pointConstraint": cmds.pointConstraint,
+            "orientConstraint": cmds.orientConstraint,
+            "scaleConstraint": cmds.scaleConstraint,
+            "aimConstraint": cmds.aimConstraint,
+        }
+
+        data = []
+        for constraintType, queryCommand in constraintTypes.items():
+            constraints = cmds.ls(type=constraintType, long=True) or []
+            for constraint in sorted(set(constraints)):
+                drivenParents = cmds.listRelatives(constraint, p=True, fullPath=True) or []
+                drivenNode = self._shortName(drivenParents[0]) if drivenParents else None
+
+                targets = []
+                try:
+                    targets = queryCommand(constraint, q=True, tl=True) or []
+                except Exception:
+                    targets = []
+
+                weightAliases = []
+                try:
+                    weightAliases = queryCommand(constraint, q=True, wal=True) or []
+                except Exception:
+                    weightAliases = []
+
+                weights = {}
+                for alias in weightAliases:
+                    try:
+                        weights[alias] = cmds.getAttr(f"{constraint}.{alias}")
+                    except Exception:
+                        continue
+
+                interpolation = None
+                try:
+                    interpolation = cmds.getAttr(f"{constraint}.interpType")
+                except Exception:
+                    interpolation = None
+
+                data.append(
+                    {
+                        "name": self._shortName(constraint),
+                        "path": constraint,
+                        "type": constraintType,
+                        "driven": drivenNode,
+                        "targets": [self._shortName(target) for target in targets],
+                        "weights": weights,
+                        "interp_type": interpolation,
+                    }
+                )
+
+        return data
+
+    def _collectConnections(self, joints: List[Dict], controls: List[Dict]) -> List[Dict]:
+        """Collect incoming attribute connections on exported rig nodes."""
+        nodePaths = set()
+        for joint in joints:
+            nodePaths.add(joint["path"])
+        for control in controls:
+            nodePaths.add(control["path"])
+
+        data = []
+        for nodePath in sorted(nodePaths):
+            connectionPairs = cmds.listConnections(
+                nodePath,
+                c=True,
+                p=True,
+                s=True,
+                d=False,
+            ) or []
+            if len(connectionPairs) % 2 != 0:
+                continue
+
+            for index in range(0, len(connectionPairs), 2):
+                destinationPlug = connectionPairs[index]
+                sourcePlug = connectionPairs[index + 1]
+                data.append(
+                    {
+                        "destination": destinationPlug,
+                        "source": sourcePlug,
+                    }
+                )
+
+        return data
+
+    def _safeGetAttrValue(self, plug: str):
+        """Get Maya attribute value, handling scalar/list return conventions."""
+        try:
+            value = cmds.getAttr(plug)
+        except Exception:
+            return None
+
+        if isinstance(value, list) and len(value) == 1:
+            entry = value[0]
+            if isinstance(entry, tuple):
+                return list(entry)
+        return value
+
+    def _safeGetAttrState(self, plug: str, state: str):
+        """Get Maya attribute state flags safely."""
+        queryByState = {
+            "keyable": {"keyable": True},
+            "channelBox": {"channelBox": True},
+            "lock": {"lock": True},
+        }
+        kwargs = queryByState.get(state, {})
+        if not kwargs:
+            return None
+
+        try:
+            return cmds.getAttr(plug, **kwargs)
+        except Exception:
+            return None
 
     def _shortName(self, fullName: str) -> str:
         """Convert Maya path name to short node name."""
@@ -238,7 +428,7 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
     def _buildUnrealScript(self, manifestPath: str) -> str:
         """Generate Unreal Python script for Control Rig creation."""
         manifestLiteral = json.dumps(manifestPath)
-        return f'''"""Generated by Rig.Sys UnrealControlRigExport."""
+        template = '''"""Generated by Rig.Sys UnrealControlRigExport."""
 
 import json
 import os
@@ -246,16 +436,16 @@ import os
 import unreal
 
 
-MANIFEST_PATH = {manifestLiteral}
+MANIFEST_PATH = __MANIFEST_PATH__
 
 
 def _log_warning(message):
-    unreal.log_warning(f"[Rig.Sys] {{message}}")
+    unreal.log_warning(f"[Rig.Sys] {message}")
 
 
 def _load_manifest():
     if not os.path.exists(MANIFEST_PATH):
-        raise RuntimeError(f"Manifest not found: {{MANIFEST_PATH}}")
+        raise RuntimeError(f"Manifest not found: {MANIFEST_PATH}")
 
     with open(MANIFEST_PATH, "r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -275,7 +465,7 @@ def _try_call(method, candidates):
         except TypeError:
             continue
         except Exception as exc:
-            _log_warning(f"Call failed for {{method}}: {{exc}}")
+            _log_warning(f"Call failed for {method}: {exc}")
             return False
     return False
 
@@ -289,14 +479,14 @@ def _to_transform(translation, rotation, scale):
 
 
 def _import_fbx_if_present(manifest):
-    fbx_path = manifest.get("export_files", {{}}).get("fbx", "")
+    fbx_path = manifest.get("export_files", {}).get("fbx", "")
     if not fbx_path:
         return
     if not os.path.exists(fbx_path):
-        _log_warning(f"FBX path does not exist: {{fbx_path}}")
+        _log_warning(f"FBX path does not exist: {fbx_path}")
         return
 
-    unreal_data = manifest.get("unreal", {{}})
+    unreal_data = manifest.get("unreal", {})
     destination = unreal_data.get("skeletal_mesh_import_path", "/Game")
     _ensure_content_path(destination)
 
@@ -315,7 +505,7 @@ def _import_fbx_if_present(manifest):
 
 
 def _create_control_rig(manifest):
-    unreal_data = manifest.get("unreal", {{}})
+    unreal_data = manifest.get("unreal", {})
     package_path = unreal_data.get("control_rig_package_path", "/Game")
     asset_name = unreal_data.get("control_rig_name", "Generated_ControlRig")
     _ensure_content_path(package_path)
@@ -350,9 +540,9 @@ def _populate_hierarchy(control_rig_bp, manifest):
             _try_call(
                 hierarchy.add_bone,
                 [
-                    ((joint["name"], parent, transform), {{"setup_undo": False}}),
-                    ((joint["name"], parent, transform, False), {{}}),
-                    ((joint["name"], parent, transform), {{}}),
+                    ((joint["name"], parent, transform), {"setup_undo": False}),
+                    ((joint["name"], parent, transform, False), {}),
+                    ((joint["name"], parent, transform), {}),
                 ],
             )
 
@@ -369,10 +559,10 @@ def _populate_hierarchy(control_rig_bp, manifest):
             control_added = _try_call(
                 hierarchy.add_control,
                 [
-                    ((control["name"], parent, control_settings, transform), {{"setup_undo": False}}),
-                    ((control["name"], parent, control_settings, transform, transform), {{"setup_undo": False}}),
-                    ((control["name"], parent, control_settings, transform, transform, False), {{}}),
-                    ((control["name"], parent, control_settings, transform, transform, False, False), {{}}),
+                    ((control["name"], parent, control_settings, transform), {"setup_undo": False}),
+                    ((control["name"], parent, control_settings, transform, transform), {"setup_undo": False}),
+                    ((control["name"], parent, control_settings, transform, transform, False), {}),
+                    ((control["name"], parent, control_settings, transform, transform, False, False), {}),
                 ],
             )
 
@@ -380,11 +570,122 @@ def _populate_hierarchy(control_rig_bp, manifest):
             _try_call(
                 hierarchy.add_null,
                 [
-                    ((control["name"], parent, transform), {{"setup_undo": False}}),
-                    ((control["name"], parent, transform, False), {{}}),
-                    ((control["name"], parent, transform), {{}}),
+                    ((control["name"], parent, transform), {"setup_undo": False}),
+                    ((control["name"], parent, transform, False), {}),
+                    ((control["name"], parent, transform), {}),
                 ],
             )
+
+
+def _apply_custom_attributes(control_rig_bp, manifest):
+    """Try to mirror Maya custom control attrs as Control Rig member variables."""
+    attrs = manifest.get("custom_control_attributes", [])
+    if not attrs:
+        return
+
+    if not hasattr(control_rig_bp, "add_member_variable"):
+        _log_warning("Control Rig blueprint does not expose add_member_variable; skipping custom attrs.")
+        return
+
+    maya_type_to_unreal = {
+        "bool": "bool",
+        "long": "int32",
+        "short": "int32",
+        "byte": "int32",
+        "enum": "int32",
+        "float": "float",
+        "double": "float",
+        "doubleAngle": "float",
+        "doubleLinear": "float",
+        "string": "string",
+    }
+
+    for attr in attrs:
+        maya_type = attr.get("type")
+        unreal_type = maya_type_to_unreal.get(maya_type)
+        if unreal_type is None:
+            continue
+
+        variable_name = f"{attr.get('control', 'CTRL')}__{attr.get('attribute', 'Attr')}"
+        variable_name = variable_name.replace(":", "_").replace("|", "_").replace(".", "_")
+
+        default_value = attr.get("value")
+        if default_value is None:
+            default_value = attr.get("default")
+        if isinstance(default_value, list):
+            if len(default_value) == 1:
+                default_value = default_value[0]
+            else:
+                default_value = str(default_value)
+        if default_value is None:
+            default_value = ""
+
+        _try_call(
+            control_rig_bp.add_member_variable,
+            [
+                ((variable_name, unreal_type), {}),
+                ((variable_name, unreal_type, str(default_value)), {}),
+                ((variable_name, unreal_type, False, False, str(default_value)), {}),
+            ],
+        )
+
+
+def _apply_constraints(control_rig_bp, manifest):
+    """Attempt best-effort reconstruction of Maya constraints."""
+    if not hasattr(control_rig_bp, "get_hierarchy_controller"):
+        return
+
+    hierarchy = control_rig_bp.get_hierarchy_controller()
+    if hierarchy is None:
+        return
+
+    for constraint in manifest.get("constraints", []):
+        ctype = constraint.get("type")
+        driven = constraint.get("driven")
+        targets = constraint.get("targets", [])
+        if not driven or not targets:
+            continue
+
+        if ctype == "parentConstraint" and hasattr(hierarchy, "set_parent"):
+            parent = targets[0]
+            _try_call(
+                hierarchy.set_parent,
+                [
+                    ((driven, parent), {"maintain_global_transform": True, "setup_undo": False}),
+                    ((driven, parent), {"maintain_global_transform": True}),
+                    ((driven, parent, True), {}),
+                    ((driven, parent), {}),
+                ],
+            )
+            continue
+
+        # Point/orient/scale/aim need explicit graph units in Control Rig; keep metadata for follow-up.
+        _log_warning(
+            f"Constraint type '{ctype}' on '{driven}' requires graph-level reconstruction; metadata preserved."
+        )
+
+
+def _persist_metadata(control_rig_bp, manifest):
+    """Save high-fidelity rig data as metadata for post-processing passes."""
+    if not hasattr(unreal.EditorAssetLibrary, "set_metadata_tag"):
+        return
+
+    asset_path = control_rig_bp.get_path_name()
+    metadata_payloads = {
+        "RigSys.ManifestSchemaVersion": str(manifest.get("schema_version", "")),
+        "RigSys.ConstraintCount": str(len(manifest.get("constraints", []))),
+        "RigSys.ConnectionCount": str(len(manifest.get("connections", []))),
+        "RigSys.CustomAttributeCount": str(len(manifest.get("custom_control_attributes", []))),
+        "RigSys.ConstraintsJSON": json.dumps(manifest.get("constraints", [])),
+        "RigSys.ConnectionsJSON": json.dumps(manifest.get("connections", [])),
+        "RigSys.CustomAttributesJSON": json.dumps(manifest.get("custom_control_attributes", [])),
+    }
+
+    for key, value in metadata_payloads.items():
+        try:
+            unreal.EditorAssetLibrary.set_metadata_tag(asset_path, key, value)
+        except Exception as exc:
+            _log_warning(f"Failed to write metadata '{key}': {exc}")
 
 
 def main():
@@ -392,6 +693,9 @@ def main():
     _import_fbx_if_present(manifest)
     control_rig_bp = _create_control_rig(manifest)
     _populate_hierarchy(control_rig_bp, manifest)
+    _apply_custom_attributes(control_rig_bp, manifest)
+    _apply_constraints(control_rig_bp, manifest)
+    _persist_metadata(control_rig_bp, manifest)
     unreal.EditorAssetLibrary.save_loaded_asset(control_rig_bp)
     unreal.log("[Rig.Sys] Unreal Control Rig generation complete.")
 
@@ -399,3 +703,4 @@ def main():
 if __name__ == "__main__":
     main()
 '''
+        return template.replace("__MANIFEST_PATH__", manifestLiteral)

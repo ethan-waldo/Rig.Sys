@@ -67,6 +67,38 @@ class _FakeMayaCmds:
                 "scale": [1.0, 1.0, 1.0],
             },
         }
+        self.userAttrs = {
+            "|Rig|modules|M_Root_CTRL": ["IK_FK_Switch"],
+            "|Rig|modules|M_RootOffset_CTRL": [],
+        }
+        self.attrData = {
+            "|Rig|modules|M_Root_CTRL.IK_FK_Switch": {
+                "type": "float",
+                "value": 0.25,
+                "keyable": True,
+                "channelBox": True,
+                "lock": False,
+                "min": 0.0,
+                "max": 1.0,
+                "default": 0.0,
+            },
+        }
+        self.connectionsByNode = {
+            "|Rig|modules|M_Root_CTRL": [
+                "|Rig|modules|M_Root_CTRL.visibility",
+                "|Rig|modules|M_RootOffset_CTRL.visibility",
+            ],
+        }
+        self.constraintData = {
+            "|Rig|constraints|M_RootOffset_parentConstraint1": {
+                "type": "parentConstraint",
+                "driven_parent": "|Rig|modules|M_RootOffset_CTRL",
+                "targets": ["|Rig|modules|M_Root_CTRL"],
+                "weight_aliases": ["M_Root_CTRLW0"],
+                "weights": {"M_Root_CTRLW0": 1.0},
+                "interp_type": 2,
+            }
+        }
 
     def about(self, version=False, apiVersion=False):
         if version:
@@ -81,6 +113,16 @@ class _FakeMayaCmds:
             return list(self.joints)
         if nodeType == "transform" and args and args[0] == "*_CTRL":
             return list(self.controls)
+        if nodeType == "parentConstraint":
+            return [path for path, info in self.constraintData.items() if info["type"] == "parentConstraint"]
+        if nodeType == "pointConstraint":
+            return [path for path, info in self.constraintData.items() if info["type"] == "pointConstraint"]
+        if nodeType == "orientConstraint":
+            return [path for path, info in self.constraintData.items() if info["type"] == "orientConstraint"]
+        if nodeType == "scaleConstraint":
+            return [path for path, info in self.constraintData.items() if info["type"] == "scaleConstraint"]
+        if nodeType == "aimConstraint":
+            return [path for path, info in self.constraintData.items() if info["type"] == "aimConstraint"]
         return []
 
     def listRelatives(self, node, p=False, type=None, fullPath=False, s=False):
@@ -115,6 +157,97 @@ class _FakeMayaCmds:
     def file(self, filePath, **kwargs):
         self.fileCalls.append((filePath, kwargs))
         return filePath
+
+    def listAttr(self, node, userDefined=False):
+        if userDefined:
+            return list(self.userAttrs.get(node, []))
+        return []
+
+    def getAttr(self, plug, type=False, keyable=False, channelBox=False, lock=False):
+        if type:
+            return self.attrData[plug]["type"]
+        if keyable:
+            return self.attrData[plug]["keyable"]
+        if channelBox:
+            return self.attrData[plug]["channelBox"]
+        if lock:
+            return self.attrData[plug]["lock"]
+        return self.attrData[plug]["value"]
+
+    def attributeQuery(
+        self,
+        attr,
+        node=None,
+        minExists=False,
+        maxExists=False,
+        minimum=False,
+        maximum=False,
+        listDefault=False,
+        listEnum=False,
+    ):
+        plug = f"{node}.{attr}"
+        attrInfo = self.attrData.get(plug, {})
+        if minExists:
+            return "min" in attrInfo
+        if maxExists:
+            return "max" in attrInfo
+        if minimum:
+            return [attrInfo["min"]]
+        if maximum:
+            return [attrInfo["max"]]
+        if listDefault:
+            return [attrInfo["default"]]
+        if listEnum:
+            return []
+        return False
+
+    def listConnections(self, node, c=False, p=False, s=False, d=False):
+        return list(self.connectionsByNode.get(node, []))
+
+    def _queryConstraint(self, constraint, queryTargets=False, queryWeightAliases=False):
+        info = self.constraintData.get(constraint)
+        if not info:
+            return []
+        if queryTargets:
+            return list(info["targets"])
+        if queryWeightAliases:
+            return list(info["weight_aliases"])
+        return []
+
+    def parentConstraint(self, constraint, q=False, tl=False, wal=False):
+        if q and tl:
+            return self._queryConstraint(constraint, queryTargets=True)
+        if q and wal:
+            return self._queryConstraint(constraint, queryWeightAliases=True)
+        return []
+
+    def pointConstraint(self, constraint, q=False, tl=False, wal=False):
+        if q and tl:
+            return self._queryConstraint(constraint, queryTargets=True)
+        if q and wal:
+            return self._queryConstraint(constraint, queryWeightAliases=True)
+        return []
+
+    def orientConstraint(self, constraint, q=False, tl=False, wal=False):
+        if q and tl:
+            return self._queryConstraint(constraint, queryTargets=True)
+        if q and wal:
+            return self._queryConstraint(constraint, queryWeightAliases=True)
+        return []
+
+    def scaleConstraint(self, constraint, q=False, tl=False, wal=False):
+        if q and tl:
+            return self._queryConstraint(constraint, queryTargets=True)
+        if q and wal:
+            return self._queryConstraint(constraint, queryWeightAliases=True)
+        return []
+
+    def aimConstraint(self, constraint, q=False, tl=False, wal=False):
+        if q and tl:
+            return self._queryConstraint(constraint, queryTargets=True)
+        if q and wal:
+            return self._queryConstraint(constraint, queryWeightAliases=True)
+        return []
 
 
 def test_unreal_control_rig_export_writes_manifest_script_and_fbx(tmp_path, monkeypatch):
@@ -156,7 +289,17 @@ def test_unreal_control_rig_export_writes_manifest_script_and_fbx(tmp_path, monk
     assert manifest["unreal"]["control_rig_name"] == "DemoRig_ControlRig"
     assert len(manifest["joints"]) == 2
     assert len(manifest["controls"]) == 2
+    assert manifest["schema_version"] == 2
+    assert len(manifest["custom_control_attributes"]) == 1
+    assert manifest["custom_control_attributes"][0]["attribute"] == "IK_FK_Switch"
+    assert len(manifest["constraints"]) == 1
+    assert manifest["constraints"][0]["type"] == "parentConstraint"
+    assert len(manifest["connections"]) == 1
+    assert manifest["connections"][0]["destination"].endswith(".visibility")
+    assert manifest["connections"][0]["source"].endswith(".visibility")
 
     scriptText = scriptPath.read_text(encoding="utf-8")
     assert "ControlRigBlueprintFactory" in scriptText
+    assert "_apply_custom_attributes" in scriptText
+    assert "_apply_constraints" in scriptText
     assert str(manifestPath) in scriptText
