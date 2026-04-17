@@ -975,7 +975,7 @@ def _apply_rig_logic_nodes(control_rig_bp, manifest):
 
 
 def _apply_rigvm_instructions(control_rig_bp, manifest):
-    """Inject generic instruction nodes into RigVM graph when controller APIs are available."""
+    """Apply RigVM instruction nodes and links when controller APIs are available."""
     instructions = manifest.get("rigvm_instructions", [])
     if not instructions:
         return
@@ -999,21 +999,215 @@ def _apply_rigvm_instructions(control_rig_bp, manifest):
         _log_warning("RigVM controller API not available; rigvm_instructions kept as metadata.")
         return
 
-    if not hasattr(controller, "add_comment_node"):
-        _log_warning("RigVM controller lacks add_comment_node; rigvm_instructions kept as metadata.")
-        return
-
     for index, instruction in enumerate(instructions):
-        payload = json.dumps(instruction, sort_keys=True)
-        position = unreal.Vector2D(float(index) * 12.0, 0.0)
-        _try_call(
-            controller.add_comment_node,
+        if _apply_single_rigvm_instruction(controller, instruction, index):
+            continue
+
+        # Fallback to comment payloads when unit-level construction is unavailable.
+        if hasattr(controller, "add_comment_node"):
+            payload = json.dumps(instruction, sort_keys=True)
+            position = unreal.Vector2D(float(index) * 12.0, 0.0)
+            _try_call(
+                controller.add_comment_node,
+                [
+                    ((payload, position, unreal.Vector2D(620.0, 70.0)), {}),
+                    ((payload, position), {}),
+                    ((payload,), {}),
+                ],
+            )
+        else:
+            _log_warning("RigVM controller has no add_comment_node fallback; instruction skipped.")
+
+
+def _apply_single_rigvm_instruction(controller, instruction, index):
+    """Apply one rigvm instruction. Returns True when any concrete operation succeeded."""
+    instruction_type = instruction.get("type")
+
+    if instruction_type == "ik_fk_blend":
+        return _apply_ik_fk_blend_instruction(controller, instruction, index)
+    if instruction_type == "ik_fk_visibility_switch":
+        return _apply_visibility_instruction(controller, instruction, index)
+    if instruction_type == "logic_constant":
+        return _apply_logic_constant_instruction(controller, instruction, index)
+
+    return False
+
+
+def _apply_ik_fk_blend_instruction(controller, instruction, index):
+    """Build a best-effort float-lerp unit and connect instruction pins."""
+    if not hasattr(controller, "add_unit_node_from_struct_path"):
+        return False
+
+    node_position = unreal.Vector2D(float(index) * 240.0, 200.0)
+    node_name = f"RigSys_IKFKBlend_{index}"
+    unit_node = _try_add_unit_node(
+        controller=controller,
+        struct_paths=[
+            "/Script/RigVM.RigVMFunction_MathFloatLerp",
+            "/Script/ControlRig.RigUnit_MathFloatLerp",
+        ],
+        position=node_position,
+        node_name=node_name,
+    )
+    if unit_node is None:
+        return False
+
+    switch_attr = instruction.get("switch_attribute")
+    fk_source = instruction.get("fk_source")
+    ik_source = instruction.get("ik_source")
+    driven = instruction.get("driven")
+    if not all([switch_attr, fk_source, ik_source, driven]):
+        return True
+
+    node_path = _resolve_node_path(unit_node, node_name)
+    if node_path is None:
+        return True
+
+    links_added = False
+    links_added |= _add_link_if_possible(controller, switch_attr, f"{node_path}.T")
+    links_added |= _add_link_if_possible(controller, fk_source, f"{node_path}.A")
+    links_added |= _add_link_if_possible(controller, ik_source, f"{node_path}.B")
+    links_added |= _add_link_if_possible(controller, f"{node_path}.Result", driven)
+
+    if not links_added:
+        _log_warning(f"IK/FK blend node created but no links could be resolved: {instruction}")
+    return True
+
+
+def _apply_visibility_instruction(controller, instruction, index):
+    """Build a best-effort bool invert chain for IK/FK visibility switching."""
+    if not hasattr(controller, "add_unit_node_from_struct_path"):
+        return False
+
+    node_position = unreal.Vector2D(float(index) * 240.0, 420.0)
+    node_name = f"RigSys_IKFKVisibility_{index}"
+    not_node = _try_add_unit_node(
+        controller=controller,
+        struct_paths=[
+            "/Script/RigVM.RigVMFunction_MathBoolNot",
+            "/Script/ControlRig.RigUnit_MathBoolNot",
+        ],
+        position=node_position,
+        node_name=node_name,
+    )
+    if not_node is None:
+        not_path = _resolve_node_path(not_node, node_name)
+        switch_attr = instruction.get("switch_attribute")
+        if switch_attr and not_path:
+            _add_link_if_possible(controller, switch_attr, f"{not_path}.Value")
+            for target in instruction.get("reverse_visible_targets", []):
+                _add_link_if_possible(controller, f"{not_path}.Result", target)
+
+    any_direct = False
+    switch_attr = instruction.get("switch_attribute")
+    if switch_attr:
+        for target in instruction.get("switch_visible_targets", []):
+            any_direct |= _add_link_if_possible(controller, switch_attr, target)
+
+    return not_node is not None or any_direct
+
+
+def _apply_logic_constant_instruction(controller, instruction, index):
+    """Build constant nodes for scalar rig logic values."""
+    if not hasattr(controller, "add_unit_node_from_struct_path"):
+        return False
+
+    value = instruction.get("value")
+    attr = instruction.get("attribute")
+    node = instruction.get("node")
+    if attr is None or node is None:
+        return False
+
+    if isinstance(value, bool):
+        struct_paths = ["/Script/RigVM.RigVMFunction_MathBoolConst", "/Script/ControlRig.RigUnit_MathBoolConst"]
+        pin_name = "Value"
+    elif isinstance(value, int):
+        struct_paths = ["/Script/RigVM.RigVMFunction_MathIntConst", "/Script/ControlRig.RigUnit_MathIntConst"]
+        pin_name = "Value"
+    elif isinstance(value, float):
+        struct_paths = ["/Script/RigVM.RigVMFunction_MathFloatConst", "/Script/ControlRig.RigUnit_MathFloatConst"]
+        pin_name = "Value"
+    else:
+        return False
+
+    node_name = f"RigSys_LogicConst_{index}"
+    node_position = unreal.Vector2D(float(index) * 240.0, 620.0)
+    const_node = _try_add_unit_node(controller, struct_paths, node_position, node_name)
+    if const_node is None:
+        return False
+
+    node_path = _resolve_node_path(const_node, node_name)
+    if node_path is None:
+        return True
+
+    _set_pin_default_if_possible(controller, f"{node_path}.{pin_name}", value)
+    return True
+
+
+def _try_add_unit_node(controller, struct_paths, position, node_name):
+    """Try to create a unit node from candidate struct paths."""
+    for struct_path in struct_paths:
+        added = _try_call(
+            controller.add_unit_node_from_struct_path,
             [
-                ((payload, position, unreal.Vector2D(620.0, 70.0)), {}),
-                ((payload, position), {}),
-                ((payload,), {}),
+                ((struct_path, "Execute", position, node_name), {}),
+                ((struct_path, "Execute", position), {}),
+                ((struct_path, position), {}),
+                ((struct_path,), {}),
             ],
         )
+        if added:
+            # Try to resolve by node name first; fallback returns None if unavailable.
+            return node_name
+    return None
+
+
+def _resolve_node_path(node_handle, fallback_name):
+    """Best-effort node path resolver for controller return variants."""
+    if node_handle is None:
+        return fallback_name
+    if isinstance(node_handle, str):
+        return node_handle
+    if hasattr(node_handle, "get_node_path"):
+        try:
+            return node_handle.get_node_path()
+        except Exception:
+            pass
+    if hasattr(node_handle, "node_path"):
+        try:
+            return node_handle.node_path
+        except Exception:
+            pass
+    return fallback_name
+
+
+def _add_link_if_possible(controller, source_pin, target_pin):
+    """Create a RigVM link if controller supports it."""
+    if not source_pin or not target_pin:
+        return False
+    if not hasattr(controller, "add_link"):
+        return False
+    return _try_call(
+        controller.add_link,
+        [
+            ((source_pin, target_pin), {}),
+            ((source_pin, target_pin, False), {}),
+        ],
+    )
+
+
+def _set_pin_default_if_possible(controller, pin_path, value):
+    """Set default value for a pin when available."""
+    if not hasattr(controller, "set_pin_default_value"):
+        return False
+    value_text = str(value).lower() if isinstance(value, bool) else str(value)
+    return _try_call(
+        controller.set_pin_default_value,
+        [
+            ((pin_path, value_text, False), {}),
+            ((pin_path, value_text), {}),
+        ],
+    )
 
 
 def _plug_to_node(plug):

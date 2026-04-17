@@ -60,6 +60,7 @@ Current parity pipeline behavior:
 - Rebuilds Control Rig hierarchy (bones/controls) and custom control attributes.
 - Applies best-effort parent-constraint parenting reconstruction.
 - Detects common IK/FK blend + visibility switch systems and stores them as structured metadata for iterative graph reconstruction passes.
+- Converts `rigvm_instructions` into best-effort RigVM unit/link construction for common IK/FK blend/visibility and scalar logic-constant patterns when Unreal controller APIs are available.
 - Persists high-fidelity rig metadata (`constraints`, `connections`, `rig_logic_nodes`, `ik_fk_systems`) onto the generated asset metadata for post-processing tooling.
 - Emits generic `rigvm_instructions` and applies best-effort RigVM graph comments + IK/FK visibility defaults in Unreal when compatible APIs are available.
 

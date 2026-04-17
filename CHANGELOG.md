@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Improved export path resolution so directory outputs correctly include module-specific file extensions.
 - Extended generated Unreal script to apply best-effort reconstruction for custom attrs and parent constraints, and persist richer metadata on the Control Rig asset.
 - Extended generated Unreal script metadata persistence with `rig_logic_nodes` and `ik_fk_systems` payloads, and added best-effort IK/FK visibility reconstruction hooks.
+- Extended generated Unreal script to build best-effort RigVM unit/link nodes from `rigvm_instructions` for IK/FK blend + visibility and scalar logic constants, with comment-node fallback when APIs are unavailable.
 - Extended generated Unreal script with best-effort RigVM instruction application (`add_comment_node` fallback path) and `rigvm_instructions` metadata persistence.
 
 [unreleased]: https://github.com/olivierlacan/keep-a-changelog/compare/v1.1.1...HEAD
