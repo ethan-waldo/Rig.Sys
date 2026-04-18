@@ -437,6 +437,8 @@ def test_unreal_control_rig_export_writes_manifest_script_and_fbx(tmp_path, monk
     assert "RigVMFunction_MathFloatPow" in scriptText
     assert "channel_hint" in scriptText
     assert "operation_pins" in scriptText
+    assert "_register_pin_mapping(pin_map, source, output_pin)" in scriptText
+    assert "_register_pin_mapping(pin_map, source, accumulator_pin)" in scriptText
     assert "\"Comparison\"" in scriptText
     assert "RigSys.RigVMInstructionsJSON" in scriptText
     assert str(manifestPath) in scriptText

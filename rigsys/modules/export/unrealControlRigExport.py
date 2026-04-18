@@ -1507,7 +1507,10 @@ def _apply_utility_node_instruction(controller, instruction, index, pin_map):
     output_pin = _utility_output_pin(mapping, node_path)
     if output_pin is not None:
         for link in instruction.get("outbound_links", []):
+            source = link.get("source")
             destination = link.get("destination")
+            if source:
+                _register_pin_mapping(pin_map, source, output_pin)
             if destination:
                 _register_pin_mapping(pin_map, destination, output_pin)
                 _add_link_if_possible(controller, output_pin, _normalize_pin(destination, pin_map))
@@ -1860,7 +1863,10 @@ def _apply_plus_minus_average_instruction(controller, instruction, index, pin_ma
                 accumulator_pin = f"{divide_path}.Result"
 
     for link in instruction.get("outbound_links", []):
+        source = link.get("source")
         destination = link.get("destination")
+        if source:
+            _register_pin_mapping(pin_map, source, accumulator_pin)
         if destination:
             _register_pin_mapping(pin_map, destination, accumulator_pin)
             _add_link_if_possible(controller, accumulator_pin, _normalize_pin(destination, pin_map))
