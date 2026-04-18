@@ -112,9 +112,12 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
         rigLogicNodes = self._collectRigLogicNodes()
         ikFkSystems = self._collectIkFkSystems()
 
+        constraints = self._collectConstraints()
+
         rigVmInstructions = self._buildRigVmInstructions(
             ikFkSystems=ikFkSystems,
             rigLogicNodes=rigLogicNodes,
+            constraints=constraints,
         )
 
         return {
@@ -138,7 +141,7 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
             "ik_fk_systems": ikFkSystems,
             "rigvm_instructions": rigVmInstructions,
             "custom_control_attributes": self._collectCustomControlAttributes(controls),
-            "constraints": self._collectConstraints(),
+            "constraints": constraints,
             "connections": self._collectConnections(joints=joints, controls=controls),
         }
 
@@ -380,6 +383,8 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
                         "path": node,
                         "type": nodeType,
                         "values": values,
+                        "inbound_links": self._collectNodeLinks(node, source=True, destination=False),
+                        "outbound_links": self._collectNodeLinks(node, source=False, destination=True),
                     }
                 )
         return data
@@ -452,7 +457,12 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
 
         return sorted(systemsBySwitch.values(), key=lambda item: item["switch_attribute"])
 
-    def _buildRigVmInstructions(self, ikFkSystems: List[Dict], rigLogicNodes: List[Dict]) -> List[Dict]:
+    def _buildRigVmInstructions(
+        self,
+        ikFkSystems: List[Dict],
+        rigLogicNodes: List[Dict],
+        constraints: List[Dict],
+    ) -> List[Dict]:
         """Build generic RigVM instruction payloads for Unreal graph reconstruction."""
         instructions = []
 
@@ -491,6 +501,16 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
             nodeName = logicNode.get("name")
             nodeType = logicNode.get("type")
             values = logicNode.get("values", {})
+            instructions.append(
+                {
+                    "type": "utility_node",
+                    "node": nodeName,
+                    "node_type": nodeType,
+                    "values": values,
+                    "inbound_links": logicNode.get("inbound_links", []),
+                    "outbound_links": logicNode.get("outbound_links", []),
+                }
+            )
             for attrName, value in values.items():
                 if not isinstance(value, (int, float, bool, str)):
                     continue
@@ -504,7 +524,124 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
                     }
                 )
 
+        for constraint in constraints:
+            ctype = constraint.get("type")
+            driven = constraint.get("driven")
+            targets = constraint.get("targets", [])
+            if not driven or not targets:
+                continue
+
+            if ctype == "pointConstraint":
+                instructions.append(
+                    {
+                        "type": "constraint_point",
+                        "driven": driven,
+                        "targets": targets,
+                    }
+                )
+            elif ctype == "orientConstraint":
+                instructions.append(
+                    {
+                        "type": "constraint_orient",
+                        "driven": driven,
+                        "targets": targets,
+                    }
+                )
+            elif ctype == "scaleConstraint":
+                instructions.append(
+                    {
+                        "type": "constraint_scale",
+                        "driven": driven,
+                        "targets": targets,
+                    }
+                )
+            elif ctype == "aimConstraint":
+                instructions.append(
+                    {
+                        "type": "constraint_aim",
+                        "driven": driven,
+                        "targets": targets,
+                    }
+                )
+
+        utilityTypeMap = {
+            "multiplyDivide": ["multiply", "divide"],
+            "plusMinusAverage": ["sum", "subtract", "average"],
+            "condition": ["condition"],
+            "clamp": ["clamp"],
+            "setRange": ["set_range"],
+            "remapValue": ["remap"],
+            "multDoubleLinear": ["multiply"],
+            "reverse": ["negate"],
+            "blendColors": ["lerp"],
+        }
+        for logicNode in rigLogicNodes:
+            nodeType = logicNode.get("type")
+            modes = utilityTypeMap.get(nodeType)
+            if not modes:
+                continue
+            instructions.append(
+                {
+                    "type": "utility_node",
+                    "node_type": nodeType,
+                    "node": logicNode.get("name"),
+                    "modes": modes,
+                    "values": logicNode.get("values", {}),
+                }
+            )
+
         return instructions
+
+    def _collectNodeLinks(self, node: str, source: bool, destination: bool) -> List[Dict]:
+        """Collect node-level connection pairs and normalize to source/destination records."""
+        connectionPairs = self._listConnectionPairs(node=node, source=source, destination=destination)
+        data = []
+        for firstPlug, secondPlug in connectionPairs:
+            firstNode = self._plugNode(firstPlug)
+            secondNode = self._plugNode(secondPlug)
+
+            localPlug = None
+            remotePlug = None
+
+            if firstNode == node and secondNode != node:
+                localPlug = firstPlug
+                remotePlug = secondPlug
+            elif secondNode == node and firstNode != node:
+                localPlug = secondPlug
+                remotePlug = firstPlug
+            else:
+                continue
+
+            if source and not destination:
+                data.append(
+                    {
+                        "source": self._shortPlug(remotePlug),
+                        "destination": self._shortPlug(localPlug),
+                    }
+                )
+            elif destination and not source:
+                data.append(
+                    {
+                        "source": self._shortPlug(localPlug),
+                        "destination": self._shortPlug(remotePlug),
+                    }
+                )
+        return data
+
+    def _listConnectionPairs(self, node: str, source: bool, destination: bool) -> List[tuple]:
+        """Query Maya for connection pairs and normalize into tuple records."""
+        try:
+            connectionPairs = cmds.listConnections(node, c=True, p=True, s=source, d=destination) or []
+        except Exception:
+            return []
+
+        if len(connectionPairs) % 2 != 0:
+            return []
+
+        data = []
+        for index in range(0, len(connectionPairs), 2):
+            data.append((connectionPairs[index], connectionPairs[index + 1]))
+        return data
 
     def _listNodeAttrs(self, node: str) -> List[str]:
         """Return list of node attrs if the Maya command is available."""
@@ -857,7 +994,7 @@ def _apply_constraints(control_rig_bp, manifest):
     if hierarchy is None:
         return
 
-    for constraint in manifest.get("constraints", []):
+    for index, constraint in enumerate(manifest.get("constraints", [])):
         ctype = constraint.get("type")
         driven = constraint.get("driven")
         targets = constraint.get("targets", [])
@@ -877,10 +1014,52 @@ def _apply_constraints(control_rig_bp, manifest):
             )
             continue
 
-        # Point/orient/scale/aim need explicit graph units in Control Rig; keep metadata for follow-up.
+        if ctype in {"pointConstraint", "orientConstraint", "scaleConstraint", "aimConstraint"}:
+            if _apply_constraint_instruction(control_rig_bp, constraint, index):
+                continue
+
+        # Remaining unsupported variants stay as metadata for follow-up.
         _log_warning(
             f"Constraint type '{ctype}' on '{driven}' requires graph-level reconstruction; metadata preserved."
         )
+
+
+def _apply_constraint_instruction(control_rig_bp, constraint, index):
+    """Translate supported non-parent constraints into rigvm instructions."""
+    instruction = _constraint_instruction_for_manifest(constraint)
+    if instruction is None:
+        return False
+
+    temp_manifest = {"rigvm_instructions": [instruction]}
+    _apply_rigvm_instructions(control_rig_bp, temp_manifest)
+    return True
+
+
+def _constraint_instruction_for_manifest(constraint):
+    """Map Maya constraint metadata to rigvm instruction payload."""
+    ctype = constraint.get("type")
+    if ctype not in {"pointConstraint", "orientConstraint", "scaleConstraint", "aimConstraint"}:
+        return None
+
+    targets = constraint.get("targets", [])
+    driven = constraint.get("driven")
+    if not targets or not driven:
+        return None
+
+    if ctype == "aimConstraint":
+        return {
+            "type": "constraint_aim",
+            "driven": driven,
+            "primary_target": targets[0],
+            "all_targets": targets,
+        }
+
+    return {
+        "type": "constraint_blend",
+        "constraint_type": ctype,
+        "driven": driven,
+        "targets": targets,
+    }
 
 
 def _apply_ik_fk_systems(control_rig_bp, manifest):
@@ -1029,6 +1208,16 @@ def _apply_single_rigvm_instruction(controller, instruction, index):
         return _apply_visibility_instruction(controller, instruction, index)
     if instruction_type == "logic_constant":
         return _apply_logic_constant_instruction(controller, instruction, index)
+    if instruction_type == "constraint_point":
+        return _apply_constraint_point_instruction(controller, instruction, index)
+    if instruction_type == "constraint_orient":
+        return _apply_constraint_orient_instruction(controller, instruction, index)
+    if instruction_type == "constraint_scale":
+        return _apply_constraint_scale_instruction(controller, instruction, index)
+    if instruction_type == "constraint_aim":
+        return _apply_constraint_aim_instruction(controller, instruction, index)
+    if instruction_type == "utility_node":
+        return _apply_utility_node_instruction(controller, instruction, index)
 
     return False
 
@@ -1142,6 +1331,232 @@ def _apply_logic_constant_instruction(controller, instruction, index):
 
     _set_pin_default_if_possible(controller, f"{node_path}.{pin_name}", value)
     return True
+
+
+def _apply_constraint_point_instruction(controller, instruction, index):
+    """Apply point-constraint style blending through vector lerp."""
+    return _apply_constraint_blend_generic(
+        controller=controller,
+        instruction=instruction,
+        index=index,
+        suffix="Point",
+        struct_paths=[
+            "/Script/RigVM.RigVMFunction_MathVectorLerp",
+            "/Script/ControlRig.RigUnit_MathVectorLerp",
+        ],
+        target_pins=["A", "B"],
+        result_pin="Result",
+    )
+
+
+def _apply_constraint_orient_instruction(controller, instruction, index):
+    """Apply orient-constraint style blending through rotator lerp."""
+    return _apply_constraint_blend_generic(
+        controller=controller,
+        instruction=instruction,
+        index=index,
+        suffix="Orient",
+        struct_paths=[
+            "/Script/RigVM.RigVMFunction_MathQuaternionSlerp",
+            "/Script/ControlRig.RigUnit_MathQuaternionSlerp",
+            "/Script/RigVM.RigVMFunction_MathRotatorLerp",
+            "/Script/ControlRig.RigUnit_MathRotatorLerp",
+        ],
+        target_pins=["A", "B"],
+        result_pin="Result",
+    )
+
+
+def _apply_constraint_scale_instruction(controller, instruction, index):
+    """Apply scale-constraint style blending through vector lerp."""
+    return _apply_constraint_blend_generic(
+        controller=controller,
+        instruction=instruction,
+        index=index,
+        suffix="Scale",
+        struct_paths=[
+            "/Script/RigVM.RigVMFunction_MathVectorLerp",
+            "/Script/ControlRig.RigUnit_MathVectorLerp",
+        ],
+        target_pins=["A", "B"],
+        result_pin="Result",
+    )
+
+
+def _apply_constraint_aim_instruction(controller, instruction, index):
+    """Apply aim-constraint approximation using look-at style units."""
+    if not hasattr(controller, "add_unit_node_from_struct_path"):
+        return False
+
+    driven = instruction.get("driven")
+    targets = instruction.get("targets", [])
+    if not driven or not targets:
+        return False
+
+    node_name = f"RigSys_ConstraintAim_{index}"
+    node_position = unreal.Vector2D(float(index) * 240.0, 980.0)
+    unit_node = _try_add_unit_node(
+        controller=controller,
+        struct_paths=[
+            "/Script/ControlRig.RigUnit_AimBone",
+            "/Script/ControlRig.RigUnit_AimConstraint",
+            "/Script/ControlRig.RigUnit_AimItem",
+        ],
+        position=node_position,
+        node_name=node_name,
+    )
+    if unit_node is None:
+        return False
+
+    node_path = _resolve_node_path(unit_node, node_name)
+    if node_path is None:
+        return True
+
+    target_pin = _resolve_target_pin(driven, "translation")
+    source_pin = _resolve_target_pin(targets[0], "translation")
+    linked = _add_link_if_possible(controller, source_pin, f"{node_path}.Target")
+    linked |= _add_link_if_possible(controller, source_pin, f"{node_path}.AimTarget")
+
+    if not linked:
+        _log_warning(f"Aim constraint unit created without target links: {instruction}")
+    return True
+
+
+def _apply_utility_node_instruction(controller, instruction, index):
+    """Apply generic utility-node mapping to RigVM math units."""
+    if not hasattr(controller, "add_unit_node_from_struct_path"):
+        return False
+
+    utility_type = instruction.get("utility_type")
+    if utility_type is None:
+        return False
+
+    mapping = _utility_node_mapping(utility_type)
+    if mapping is None:
+        return False
+
+    node_name = f"RigSys_Utility_{utility_type}_{index}"
+    node_position = unreal.Vector2D(float(index) * 240.0, 1260.0)
+    unit_node = _try_add_unit_node(
+        controller=controller,
+        struct_paths=mapping["struct_paths"],
+        position=node_position,
+        node_name=node_name,
+    )
+    if unit_node is None:
+        return False
+
+    node_path = _resolve_node_path(unit_node, node_name)
+    if node_path is None:
+        return True
+
+    for source_attr, target_pin in mapping.get("pin_map", []):
+        value = (instruction.get("values") or {}).get(source_attr)
+        if value is None:
+            continue
+        _set_pin_default_if_possible(controller, f"{node_path}.{target_pin}", value)
+
+    return True
+
+
+def _apply_constraint_blend_generic(controller, instruction, index, suffix, struct_paths, target_pins, result_pin):
+    """Generic helper for transform-space weighted constraint blends."""
+    if not hasattr(controller, "add_unit_node_from_struct_path"):
+        return False
+
+    driven = instruction.get("driven")
+    targets = instruction.get("targets", [])
+    if not driven or not targets:
+        return False
+
+    node_name = f"RigSys_Constraint{suffix}_{index}"
+    node_position = unreal.Vector2D(float(index) * 240.0, 860.0)
+    unit_node = _try_add_unit_node(
+        controller=controller,
+        struct_paths=struct_paths,
+        position=node_position,
+        node_name=node_name,
+    )
+    if unit_node is None:
+        return False
+
+    node_path = _resolve_node_path(unit_node, node_name)
+    if node_path is None:
+        return True
+
+    pin_kind = "translation" if suffix in {"Point", "Scale"} else "rotation"
+    links_added = False
+    for pin_index, target in enumerate(targets[: len(target_pins)]):
+        source_pin = _resolve_target_pin(target, pin_kind)
+        links_added |= _add_link_if_possible(controller, source_pin, f"{node_path}.{target_pins[pin_index]}")
+
+    if len(targets) >= 2 and instruction.get("switch_attribute"):
+        links_added |= _add_link_if_possible(controller, instruction["switch_attribute"], f"{node_path}.T")
+        links_added |= _add_link_if_possible(controller, instruction["switch_attribute"], f"{node_path}.Weight")
+        links_added |= _add_link_if_possible(controller, instruction["switch_attribute"], f"{node_path}.Alpha")
+
+    if driven:
+        driven_pin = _resolve_target_pin(driven, pin_kind)
+        links_added |= _add_link_if_possible(controller, f"{node_path}.{result_pin}", driven_pin)
+
+    if not links_added:
+        _log_warning(f"Constraint blend unit created but no links resolved: {instruction}")
+    return True
+
+
+def _resolve_target_pin(node_or_plug, attribute_kind):
+    """Resolve a target to a plug path suitable for link creation."""
+    if not node_or_plug:
+        return node_or_plug
+    if "." in node_or_plug:
+        return node_or_plug
+    if attribute_kind == "rotation":
+        return f"{node_or_plug}.rotation"
+    if attribute_kind == "scale":
+        return f"{node_or_plug}.scale"
+    return f"{node_or_plug}.translation"
+
+
+def _utility_node_mapping(utility_type):
+    """Map Maya utility node types to RigVM math unit signatures."""
+    mappings = {
+        "reverse": {
+            "struct_paths": [
+                "/Script/RigVM.RigVMFunction_MathFloatNegate",
+                "/Script/ControlRig.RigUnit_MathFloatNegate",
+            ],
+            "pin_map": [("inputX", "Value"), ("input.inputX", "Value")],
+        },
+        "multiplyDivide": {
+            "struct_paths": [
+                "/Script/RigVM.RigVMFunction_MathFloatMul",
+                "/Script/ControlRig.RigUnit_MathFloatMul",
+            ],
+            "pin_map": [("input1X", "A"), ("input2X", "B")],
+        },
+        "plusMinusAverage": {
+            "struct_paths": [
+                "/Script/RigVM.RigVMFunction_MathFloatAdd",
+                "/Script/ControlRig.RigUnit_MathFloatAdd",
+            ],
+            "pin_map": [("input1D[0]", "A"), ("input1D[1]", "B")],
+        },
+        "multDoubleLinear": {
+            "struct_paths": [
+                "/Script/RigVM.RigVMFunction_MathFloatMul",
+                "/Script/ControlRig.RigUnit_MathFloatMul",
+            ],
+            "pin_map": [("input1", "A"), ("input2", "B")],
+        },
+        "blendColors": {
+            "struct_paths": [
+                "/Script/RigVM.RigVMFunction_MathFloatLerp",
+                "/Script/ControlRig.RigUnit_MathFloatLerp",
+            ],
+            "pin_map": [("color1R", "A"), ("color2R", "B"), ("blender", "T")],
+        },
+    }
+    return mappings.get(utility_type)
 
 
 def _try_add_unit_node(controller, struct_paths, position, node_name):

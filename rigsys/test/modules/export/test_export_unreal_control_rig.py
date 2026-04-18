@@ -134,7 +134,39 @@ class _FakeMayaCmds:
                 "weight_aliases": ["M_Root_CTRLW0"],
                 "weights": {"M_Root_CTRLW0": 1.0},
                 "interp_type": 2,
-            }
+            },
+            "|Rig|constraints|M_Result_pointConstraint1": {
+                "type": "pointConstraint",
+                "driven_parent": "|Rig|skeleton|M_Result",
+                "targets": ["|Rig|modules|M_Root_CTRL", "|Rig|modules|M_RootOffset_CTRL"],
+                "weight_aliases": ["M_Root_CTRLW0", "M_RootOffset_CTRLW1"],
+                "weights": {"M_Root_CTRLW0": 0.7, "M_RootOffset_CTRLW1": 0.3},
+                "interp_type": 0,
+            },
+            "|Rig|constraints|M_Result_orientConstraint1": {
+                "type": "orientConstraint",
+                "driven_parent": "|Rig|skeleton|M_Result",
+                "targets": ["|Rig|modules|M_Root_CTRL", "|Rig|modules|M_RootOffset_CTRL"],
+                "weight_aliases": ["M_Root_CTRLW0", "M_RootOffset_CTRLW1"],
+                "weights": {"M_Root_CTRLW0": 0.5, "M_RootOffset_CTRLW1": 0.5},
+                "interp_type": 2,
+            },
+            "|Rig|constraints|M_Result_scaleConstraint1": {
+                "type": "scaleConstraint",
+                "driven_parent": "|Rig|skeleton|M_Result",
+                "targets": ["|Rig|modules|M_Root_CTRL", "|Rig|modules|M_RootOffset_CTRL"],
+                "weight_aliases": ["M_Root_CTRLW0", "M_RootOffset_CTRLW1"],
+                "weights": {"M_Root_CTRLW0": 0.4, "M_RootOffset_CTRLW1": 0.6},
+                "interp_type": 0,
+            },
+            "|Rig|constraints|M_Result_aimConstraint1": {
+                "type": "aimConstraint",
+                "driven_parent": "|Rig|skeleton|M_Result",
+                "targets": ["|Rig|modules|M_Root_CTRL"],
+                "weight_aliases": ["M_Root_CTRLW0"],
+                "weights": {"M_Root_CTRLW0": 1.0},
+                "interp_type": 0,
+            },
         }
 
     def about(self, version=False, apiVersion=False):
@@ -352,7 +384,7 @@ def test_unreal_control_rig_export_writes_manifest_script_and_fbx(tmp_path, monk
     assert manifest["schema_version"] == 4
     assert len(manifest["custom_control_attributes"]) == 1
     assert manifest["custom_control_attributes"][0]["attribute"] == "IK_FK_Switch"
-    assert len(manifest["constraints"]) == 1
+    assert len(manifest["constraints"]) == 5
     assert manifest["constraints"][0]["type"] == "parentConstraint"
     assert len(manifest["connections"]) == 1
     assert manifest["connections"][0]["destination"].endswith(".visibility")
@@ -360,7 +392,7 @@ def test_unreal_control_rig_export_writes_manifest_script_and_fbx(tmp_path, monk
     assert len(manifest["rig_logic_nodes"]) == 2
     assert len(manifest["ik_fk_systems"]) == 1
     assert manifest["ik_fk_systems"][0]["switch_attribute"] == "M_Root_CTRL.IK_FK_Switch"
-    assert len(manifest["rigvm_instructions"]) >= 4
+    assert len(manifest["rigvm_instructions"]) >= 8
 
     scriptText = scriptPath.read_text(encoding="utf-8")
     assert "ControlRigBlueprintFactory" in scriptText
@@ -371,6 +403,12 @@ def test_unreal_control_rig_export_writes_manifest_script_and_fbx(tmp_path, monk
     assert "_apply_rigvm_instructions" in scriptText
     assert "_apply_ik_fk_blend_instruction" in scriptText
     assert "_apply_visibility_instruction" in scriptText
+    assert "_apply_constraint_point_instruction" in scriptText
+    assert "_apply_constraint_orient_instruction" in scriptText
+    assert "_apply_constraint_scale_instruction" in scriptText
+    assert "_apply_constraint_aim_instruction" in scriptText
+    assert "_apply_utility_node_instruction" in scriptText
+    assert "_utility_node_mapping" in scriptText
     assert "add_unit_node_from_struct_path" in scriptText
     assert "add_link" in scriptText
     assert "RigSys.RigVMInstructionsJSON" in scriptText
