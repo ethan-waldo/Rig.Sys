@@ -397,6 +397,12 @@ def test_unreal_control_rig_export_writes_manifest_script_and_fbx(tmp_path, monk
     assert len(manifest["ik_fk_systems"]) == 1
     assert manifest["ik_fk_systems"][0]["switch_attribute"] == "M_Root_CTRL.IK_FK_Switch"
     assert len(manifest["rigvm_instructions"]) >= 6
+    utilityInstructions = [
+        instruction for instruction in manifest["rigvm_instructions"] if instruction.get("type") == "utility_node"
+    ]
+    assert utilityInstructions
+    assert utilityInstructions[0]["utility_type"] == utilityInstructions[0]["node_type"]
+    assert "operation" in utilityInstructions[0]
 
     scriptText = scriptPath.read_text(encoding="utf-8")
     assert "ControlRigBlueprintFactory" in scriptText
@@ -418,5 +424,11 @@ def test_unreal_control_rig_export_writes_manifest_script_and_fbx(tmp_path, monk
     assert "_normalize_pin" in scriptText
     assert "add_unit_node_from_struct_path" in scriptText
     assert "add_link" in scriptText
+    assert "RigVMFunction_MathFloatDiv" in scriptText
+    assert "RigVMFunction_MathFloatSub" in scriptText
+    assert "RigVMFunction_MathFloatCondition" in scriptText
+    assert "RigVMFunction_MathFloatClamp" in scriptText
+    assert "RigVMFunction_MathFloatRemap" in scriptText
+    assert "operation_pins" in scriptText
     assert "RigSys.RigVMInstructionsJSON" in scriptText
     assert str(manifestPath) in scriptText

@@ -516,11 +516,16 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
             nodeName = logicNode.get("name")
             nodeType = logicNode.get("type")
             values = logicNode.get("values", {})
+            operationValue = values.get("operation")
+            if isinstance(operationValue, (list, tuple)) and operationValue:
+                operationValue = operationValue[0]
             instructions.append(
                 {
                     "type": "utility_node",
                     "node": nodeName,
                     "node_type": nodeType,
+                    "utility_type": nodeType,
+                    "operation": operationValue,
                     "values": values,
                     "inbound_links": logicNode.get("inbound_links", []),
                     "outbound_links": logicNode.get("outbound_links", []),
@@ -1435,11 +1440,14 @@ def _apply_utility_node_instruction(controller, instruction, index, pin_map):
     if not hasattr(controller, "add_unit_node_from_struct_path"):
         return False
 
-    utility_type = instruction.get("utility_type")
+    utility_type = instruction.get("utility_type") or instruction.get("node_type")
     if utility_type is None:
         return False
 
-    mapping = _utility_node_mapping(utility_type)
+    operation = instruction.get("operation")
+    mapping = _utility_node_mapping(utility_type, operation)
+    if mapping is None:
+        mapping = _utility_node_mapping(utility_type)
     if mapping is None:
         return False
 
@@ -1458,11 +1466,18 @@ def _apply_utility_node_instruction(controller, instruction, index, pin_map):
     if node_path is None:
         return True
 
+    values = instruction.get("values") or {}
     for source_attr, target_pin in mapping.get("pin_map", []):
-        value = (instruction.get("values") or {}).get(source_attr)
+        value = _utility_attr_value(values, source_attr)
         if value is None:
             continue
         _set_pin_default_if_possible(controller, f"{node_path}.{target_pin}", value)
+
+    operation = _extract_numeric_default(operation)
+    if operation is not None:
+        for operation_pin in mapping.get("operation_pins", []):
+            if _set_pin_default_if_possible(controller, f"{node_path}.{operation_pin}", operation):
+                break
 
     for link in instruction.get("inbound_links", []):
         source_plug = link.get("source")
@@ -1538,6 +1553,9 @@ def _apply_constraint_blend_generic(
 
 def _utility_pin_for_attr(mapping, attr_name):
     """Resolve utility-node input attribute to mapped unit pin."""
+    attr_name = _utility_attr_alias(mapping, attr_name)
+    aliases = mapping.get("aliases", {})
+    attr_name = aliases.get(attr_name, attr_name)
     for source_attr, target_pin in mapping.get("pin_map", []):
         if source_attr == attr_name:
             return target_pin
@@ -1550,6 +1568,62 @@ def _utility_output_pin(mapping, node_path):
     if not output_pin:
         return None
     return f"{node_path}.{output_pin}"
+
+
+def _utility_attr_alias(mapping, attr_name):
+    """Normalize utility attr aliases and compound-path variants."""
+    if not attr_name:
+        return attr_name
+    normalized = attr_name
+    for prefix in ("input.", "output."):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :]
+
+    aliases = mapping.get("aliases", {})
+    normalized = aliases.get(normalized, normalized)
+    if normalized in aliases:
+        normalized = aliases.get(normalized, normalized)
+    return normalized
+
+
+def _extract_numeric_default(value):
+    """Extract scalar defaults from Maya list-style values."""
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return None
+        value = value[0]
+    if isinstance(value, (int, float, bool)):
+        return value
+    return None
+
+
+def _utility_attr_value(values, attr_name):
+    """Resolve utility attribute values with alias/compound fallback."""
+    if not isinstance(values, dict):
+        return None
+
+    candidate_keys = [attr_name]
+    if attr_name and "." not in attr_name:
+        candidate_keys.extend([f"input.{attr_name}", f"output.{attr_name}"])
+
+    for key in candidate_keys:
+        if key in values:
+            return _extract_numeric_default(values.get(key))
+
+    if attr_name and "[" in attr_name:
+        list_root = attr_name.split("[", 1)[0]
+        if list_root in values:
+            root_value = values.get(list_root)
+            if isinstance(root_value, (list, tuple)):
+                try:
+                    index_text = attr_name.split("[", 1)[1].split("]", 1)[0]
+                    list_index = int(index_text)
+                except Exception:
+                    list_index = 0
+                if 0 <= list_index < len(root_value):
+                    return _extract_numeric_default(root_value[list_index])
+            return _extract_numeric_default(root_value)
+    return None
 
 
 def _resolve_target_pin(node_or_plug, attribute_kind):
@@ -1615,8 +1689,72 @@ def _auto_link_manifest_connections(controller, manifest, pin_map):
         _add_link_if_possible(controller, source, destination)
 
 
-def _utility_node_mapping(utility_type):
+def _utility_node_mapping(utility_type, operation=None):
     """Map Maya utility node types to RigVM math unit signatures."""
+    operation_modes = {
+        "multiplyDivide": {
+            1: [
+                "/Script/RigVM.RigVMFunction_MathFloatMul",
+                "/Script/ControlRig.RigUnit_MathFloatMul",
+            ],
+            2: [
+                "/Script/RigVM.RigVMFunction_MathFloatDiv",
+                "/Script/ControlRig.RigUnit_MathFloatDiv",
+            ],
+            3: [
+                "/Script/RigVM.RigVMFunction_MathFloatPow",
+                "/Script/ControlRig.RigUnit_MathFloatPow",
+            ],
+        },
+        "plusMinusAverage": {
+            1: [
+                "/Script/RigVM.RigVMFunction_MathFloatAdd",
+                "/Script/ControlRig.RigUnit_MathFloatAdd",
+            ],
+            2: [
+                "/Script/RigVM.RigVMFunction_MathFloatSub",
+                "/Script/ControlRig.RigUnit_MathFloatSub",
+            ],
+            3: [
+                "/Script/RigVM.RigVMFunction_MathFloatAdd",
+                "/Script/ControlRig.RigUnit_MathFloatAdd",
+            ],
+        },
+        "condition": {
+            0: [
+                "/Script/RigVM.RigVMFunction_MathFloatCondition",
+                "/Script/ControlRig.RigUnit_MathFloatCondition",
+            ],
+            1: [
+                "/Script/RigVM.RigVMFunction_MathFloatCondition",
+                "/Script/ControlRig.RigUnit_MathFloatCondition",
+            ],
+            2: [
+                "/Script/RigVM.RigVMFunction_MathFloatCondition",
+                "/Script/ControlRig.RigUnit_MathFloatCondition",
+            ],
+            3: [
+                "/Script/RigVM.RigVMFunction_MathFloatCondition",
+                "/Script/ControlRig.RigUnit_MathFloatCondition",
+            ],
+            4: [
+                "/Script/RigVM.RigVMFunction_MathFloatCondition",
+                "/Script/ControlRig.RigUnit_MathFloatCondition",
+            ],
+            5: [
+                "/Script/RigVM.RigVMFunction_MathFloatCondition",
+                "/Script/ControlRig.RigUnit_MathFloatCondition",
+            ],
+        },
+    }
+
+    operation_index = None
+    extracted = _extract_numeric_default(operation)
+    if isinstance(extracted, bool):
+        operation_index = int(extracted)
+    elif isinstance(extracted, (int, float)):
+        operation_index = int(extracted)
+
     mappings = {
         "reverse": {
             "struct_paths": [
@@ -1624,22 +1762,35 @@ def _utility_node_mapping(utility_type):
                 "/Script/ControlRig.RigUnit_MathFloatNegate",
             ],
             "pin_map": [("inputX", "Value"), ("input.inputX", "Value")],
+            "aliases": {
+                "input.inputX": "inputX",
+                "output.outputX": "outputX",
+            },
             "output_pin": "Result",
         },
         "multiplyDivide": {
-            "struct_paths": [
-                "/Script/RigVM.RigVMFunction_MathFloatMul",
-                "/Script/ControlRig.RigUnit_MathFloatMul",
-            ],
+            "struct_paths": operation_modes["multiplyDivide"].get(
+                operation_index,
+                operation_modes["multiplyDivide"][1],
+            ),
             "pin_map": [("input1X", "A"), ("input2X", "B")],
+            "aliases": {
+                "input1.input1X": "input1X",
+                "input2.input2X": "input2X",
+                "output.outputX": "outputX",
+            },
             "output_pin": "Result",
         },
         "plusMinusAverage": {
-            "struct_paths": [
-                "/Script/RigVM.RigVMFunction_MathFloatAdd",
-                "/Script/ControlRig.RigUnit_MathFloatAdd",
-            ],
+            "struct_paths": operation_modes["plusMinusAverage"].get(
+                operation_index,
+                operation_modes["plusMinusAverage"][1],
+            ),
             "pin_map": [("input1D[0]", "A"), ("input1D[1]", "B")],
+            "aliases": {
+                "input1D": "input1D[0]",
+                "output1D": "output1D",
+            },
             "output_pin": "Result",
         },
         "multDoubleLinear": {
@@ -1656,6 +1807,83 @@ def _utility_node_mapping(utility_type):
                 "/Script/ControlRig.RigUnit_MathFloatLerp",
             ],
             "pin_map": [("color1R", "A"), ("color2R", "B"), ("blender", "T")],
+            "aliases": {
+                "color1.color1R": "color1R",
+                "color2.color2R": "color2R",
+                "output.outputR": "outputR",
+            },
+            "output_pin": "Result",
+        },
+        "condition": {
+            "struct_paths": operation_modes["condition"].get(
+                operation_index,
+                operation_modes["condition"][0],
+            ),
+            "pin_map": [
+                ("firstTerm", "FirstTerm"),
+                ("secondTerm", "SecondTerm"),
+                ("colorIfFalseR", "False"),
+                ("colorIfTrueR", "True"),
+            ],
+            "aliases": {
+                "colorIfFalse.colorIfFalseR": "colorIfFalseR",
+                "colorIfTrue.colorIfTrueR": "colorIfTrueR",
+                "outColor.outColorR": "outColorR",
+            },
+            "operation_pins": ["Operation", "Op", "ConditionOperation"],
+            "output_pin": "Result",
+        },
+        "clamp": {
+            "struct_paths": [
+                "/Script/RigVM.RigVMFunction_MathFloatClamp",
+                "/Script/ControlRig.RigUnit_MathFloatClamp",
+            ],
+            "pin_map": [("inputR", "Value"), ("minR", "Min"), ("maxR", "Max")],
+            "aliases": {
+                "input.inputR": "inputR",
+                "min.minR": "minR",
+                "max.maxR": "maxR",
+                "output.outputR": "outputR",
+            },
+            "output_pin": "Result",
+        },
+        "setRange": {
+            "struct_paths": [
+                "/Script/RigVM.RigVMFunction_MathFloatRemap",
+                "/Script/ControlRig.RigUnit_MathFloatRemap",
+            ],
+            "pin_map": [
+                ("valueX", "Value"),
+                ("oldMinX", "SourceMinimum"),
+                ("oldMaxX", "SourceMaximum"),
+                ("minX", "TargetMinimum"),
+                ("maxX", "TargetMaximum"),
+            ],
+            "aliases": {
+                "value.valueX": "valueX",
+                "oldMin.oldMinX": "oldMinX",
+                "oldMax.oldMaxX": "oldMaxX",
+                "min.minX": "minX",
+                "max.maxX": "maxX",
+                "outValue.outValueX": "outValueX",
+            },
+            "output_pin": "Result",
+        },
+        "remapValue": {
+            "struct_paths": [
+                "/Script/RigVM.RigVMFunction_MathFloatRemap",
+                "/Script/ControlRig.RigUnit_MathFloatRemap",
+            ],
+            "pin_map": [
+                ("inputValue", "Value"),
+                ("inputMin", "SourceMinimum"),
+                ("inputMax", "SourceMaximum"),
+                ("outputMin", "TargetMinimum"),
+                ("outputMax", "TargetMaximum"),
+            ],
+            "aliases": {
+                "outValue": "outValue",
+            },
             "output_pin": "Result",
         },
     }
