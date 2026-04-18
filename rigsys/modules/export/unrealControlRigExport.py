@@ -1451,6 +1451,17 @@ def _apply_utility_node_instruction(controller, instruction, index, pin_map):
     if mapping is None:
         return False
 
+    if utility_type == "plusMinusAverage":
+        handled = _apply_plus_minus_average_instruction(
+            controller=controller,
+            instruction=instruction,
+            index=index,
+            pin_map=pin_map,
+            mapping=mapping,
+        )
+        if handled:
+            return True
+
     node_name = f"RigSys_Utility_{utility_type}_{index}"
     node_position = unreal.Vector2D(float(index) * 240.0, 1260.0)
     unit_node = _try_add_unit_node(
@@ -1473,11 +1484,12 @@ def _apply_utility_node_instruction(controller, instruction, index, pin_map):
             continue
         _set_pin_default_if_possible(controller, f"{node_path}.{target_pin}", value)
 
-    operation = _extract_numeric_default(operation)
-    if operation is not None:
+    operation_values = _utility_operation_values(utility_type, operation)
+    if operation_values:
         for operation_pin in mapping.get("operation_pins", []):
-            if _set_pin_default_if_possible(controller, f"{node_path}.{operation_pin}", operation):
-                break
+            for operation_value in operation_values:
+                if _set_pin_default_if_possible(controller, f"{node_path}.{operation_pin}", operation_value):
+                    break
 
     for link in instruction.get("inbound_links", []):
         source_plug = link.get("source")
@@ -1556,9 +1568,12 @@ def _utility_pin_for_attr(mapping, attr_name):
     attr_name = _utility_attr_alias(mapping, attr_name)
     aliases = mapping.get("aliases", {})
     attr_name = aliases.get(attr_name, attr_name)
-    for source_attr, target_pin in mapping.get("pin_map", []):
-        if source_attr == attr_name:
-            return target_pin
+    for source_attrs, target_pin in mapping.get("pin_map", []):
+        if not isinstance(source_attrs, (list, tuple)):
+            source_attrs = [source_attrs]
+        for source_attr in source_attrs:
+            if source_attr == attr_name:
+                return target_pin
     return None
 
 
@@ -1597,8 +1612,37 @@ def _extract_numeric_default(value):
     return None
 
 
+def _utility_operation_values(utility_type, operation):
+    """Build candidate operation defaults for unit operation pins."""
+    operation_value = _extract_numeric_default(operation)
+    if operation_value is None:
+        return []
+
+    values = [operation_value]
+    if utility_type != "condition":
+        return values
+
+    condition_literals = {
+        0: ["Equal", "Equals", "EqualTo", "EQUAL"],
+        1: ["NotEqual", "NotEquals", "NotEqualTo", "NOT_EQUAL"],
+        2: ["Greater", "GreaterThan", "GREATER_THAN"],
+        3: ["GreaterOrEqual", "GreaterEqual", "GREATER_OR_EQUAL"],
+        4: ["Less", "LessThan", "LESS_THAN"],
+        5: ["LessOrEqual", "LessEqual", "LESS_OR_EQUAL"],
+    }
+    values.extend(condition_literals.get(int(operation_value), []))
+    return values
+
+
 def _utility_attr_value(values, attr_name):
     """Resolve utility attribute values with alias/compound fallback."""
+    if isinstance(attr_name, (list, tuple)):
+        for attr in attr_name:
+            resolved = _utility_attr_value(values, attr)
+            if resolved is not None:
+                return resolved
+        return None
+
     if not isinstance(values, dict):
         return None
 
@@ -1624,6 +1668,127 @@ def _utility_attr_value(values, attr_name):
                     return _extract_numeric_default(root_value[list_index])
             return _extract_numeric_default(root_value)
     return None
+
+
+def _utility_inbound_source_for_attr(instruction, mapping, attr_name):
+    """Find a linked source plug for a specific utility input attr."""
+    normalized_attr = _utility_attr_alias(mapping, attr_name)
+    for link in instruction.get("inbound_links", []):
+        source_plug = link.get("source")
+        destination_plug = link.get("destination")
+        if not source_plug or not destination_plug:
+            continue
+        destination_attr = destination_plug.split(".", 1)[1] if "." in destination_plug else destination_plug
+        destination_attr = _utility_attr_alias(mapping, destination_attr)
+        if destination_attr == normalized_attr:
+            return source_plug
+    return None
+
+
+def _apply_plus_minus_average_instruction(controller, instruction, index, pin_map, mapping):
+    """Build plusMinusAverage using chained math units for multi-input parity."""
+    if not hasattr(controller, "add_unit_node_from_struct_path"):
+        return False
+
+    operation = _extract_numeric_default(instruction.get("operation"))
+    if operation is None:
+        operation = 1
+    operation = int(operation)
+    if operation not in {1, 2, 3}:
+        operation = 1
+
+    values = instruction.get("values") or {}
+    input_attrs = []
+    for key in sorted(values.keys()):
+        if key.startswith("input1D[") and key.endswith("]"):
+            input_attrs.append(key)
+    if not input_attrs and isinstance(values.get("input1D"), (list, tuple)):
+        input_attrs = [f"input1D[{idx}]" for idx in range(len(values.get("input1D")))]
+
+    for link in instruction.get("inbound_links", []):
+        destination_plug = link.get("destination")
+        if not destination_plug:
+            continue
+        destination_attr = destination_plug.split(".", 1)[1] if "." in destination_plug else destination_plug
+        destination_attr = _utility_attr_alias(mapping, destination_attr)
+        if destination_attr.startswith("input1D[") and destination_attr not in input_attrs:
+            input_attrs.append(destination_attr)
+
+    input_attrs = sorted(set(input_attrs), key=lambda attr: int(attr.split("[", 1)[1].split("]", 1)[0]))
+    if len(input_attrs) < 2:
+        return False
+
+    operation_struct_paths = {
+        1: [
+            "/Script/RigVM.RigVMFunction_MathFloatAdd",
+            "/Script/ControlRig.RigUnit_MathFloatAdd",
+        ],
+        2: [
+            "/Script/RigVM.RigVMFunction_MathFloatSub",
+            "/Script/ControlRig.RigUnit_MathFloatSub",
+        ],
+    }
+    unit_struct_paths = operation_struct_paths.get(operation, operation_struct_paths[1])
+
+    def _wire_operand(target_pin, attr_name):
+        source_pin = _utility_inbound_source_for_attr(instruction, mapping, attr_name)
+        if source_pin:
+            return _add_link_if_possible(controller, _normalize_pin(source_pin, pin_map), target_pin)
+        value = _utility_attr_value(values, attr_name)
+        if value is None:
+            return False
+        return _set_pin_default_if_possible(controller, target_pin, value)
+
+    accumulator_pin = None
+    step_index = 0
+    for attr_index in range(1, len(input_attrs)):
+        node_name = f"RigSys_Utility_plusMinusAverage_{index}_{step_index}"
+        node_position = unreal.Vector2D(float(index) * 240.0 + (step_index * 120.0), 1260.0)
+        unit_node = _try_add_unit_node(controller, unit_struct_paths, node_position, node_name)
+        if unit_node is None:
+            return False
+
+        node_path = _resolve_node_path(unit_node, node_name)
+        if node_path is None:
+            return True
+
+        if accumulator_pin is None:
+            _wire_operand(f"{node_path}.A", input_attrs[0])
+        else:
+            _add_link_if_possible(controller, accumulator_pin, f"{node_path}.A")
+
+        _wire_operand(f"{node_path}.B", input_attrs[attr_index])
+        accumulator_pin = f"{node_path}.Result"
+        step_index += 1
+
+    if accumulator_pin is None:
+        return False
+
+    if operation == 3:
+        divide_node_name = f"RigSys_Utility_plusMinusAverageAverage_{index}"
+        divide_position = unreal.Vector2D(float(index) * 240.0 + (step_index * 120.0), 1260.0)
+        divide_node = _try_add_unit_node(
+            controller,
+            [
+                "/Script/RigVM.RigVMFunction_MathFloatDiv",
+                "/Script/ControlRig.RigUnit_MathFloatDiv",
+            ],
+            divide_position,
+            divide_node_name,
+        )
+        if divide_node is not None:
+            divide_path = _resolve_node_path(divide_node, divide_node_name)
+            if divide_path:
+                _add_link_if_possible(controller, accumulator_pin, f"{divide_path}.A")
+                _set_pin_default_if_possible(controller, f"{divide_path}.B", float(len(input_attrs)))
+                accumulator_pin = f"{divide_path}.Result"
+
+    for link in instruction.get("outbound_links", []):
+        destination = link.get("destination")
+        if destination:
+            _register_pin_mapping(pin_map, destination, accumulator_pin)
+            _add_link_if_possible(controller, accumulator_pin, _normalize_pin(destination, pin_map))
+    return True
 
 
 def _resolve_target_pin(node_or_plug, attribute_kind):
@@ -1786,7 +1951,10 @@ def _utility_node_mapping(utility_type, operation=None):
                 operation_index,
                 operation_modes["plusMinusAverage"][1],
             ),
-            "pin_map": [("input1D[0]", "A"), ("input1D[1]", "B")],
+            "pin_map": [
+                (("input1D[0]", "input1D"), "A"),
+                (("input1D[1]",), "B"),
+            ],
             "aliases": {
                 "input1D": "input1D[0]",
                 "output1D": "output1D",
@@ -1830,7 +1998,7 @@ def _utility_node_mapping(utility_type, operation=None):
                 "colorIfTrue.colorIfTrueR": "colorIfTrueR",
                 "outColor.outColorR": "outColorR",
             },
-            "operation_pins": ["Operation", "Op", "ConditionOperation"],
+            "operation_pins": ["Operation", "Op", "ConditionOperation", "Comparison", "Condition"],
             "output_pin": "Result",
         },
         "clamp": {
