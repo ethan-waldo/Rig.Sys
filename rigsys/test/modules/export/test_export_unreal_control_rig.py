@@ -419,6 +419,9 @@ def test_unreal_control_rig_export_writes_manifest_script_and_fbx(tmp_path, monk
     assert "_apply_constraint_aim_instruction" in scriptText
     assert "_apply_utility_node_instruction" in scriptText
     assert "_apply_plus_minus_average_instruction" in scriptText
+    assert "_detect_utility_channel_hint" in scriptText
+    assert "_resolve_utility_channel_suffix" in scriptText
+    assert "_utility_attr_channel_suffix" in scriptText
     assert "_utility_operation_values" in scriptText
     assert "_utility_node_mapping" in scriptText
     assert "_auto_link_manifest_connections" in scriptText
@@ -432,6 +435,7 @@ def test_unreal_control_rig_export_writes_manifest_script_and_fbx(tmp_path, monk
     assert "RigVMFunction_MathFloatClamp" in scriptText
     assert "RigVMFunction_MathFloatRemap" in scriptText
     assert "RigVMFunction_MathFloatPow" in scriptText
+    assert "channel_hint" in scriptText
     assert "operation_pins" in scriptText
     assert "\"Comparison\"" in scriptText
     assert "RigSys.RigVMInstructionsJSON" in scriptText

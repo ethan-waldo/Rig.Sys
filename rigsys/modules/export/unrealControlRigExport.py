@@ -1445,9 +1445,10 @@ def _apply_utility_node_instruction(controller, instruction, index, pin_map):
         return False
 
     operation = instruction.get("operation")
-    mapping = _utility_node_mapping(utility_type, operation)
+    channel_hint = _detect_utility_channel_hint(instruction, utility_type)
+    mapping = _utility_node_mapping(utility_type, operation, channel_hint)
     if mapping is None:
-        mapping = _utility_node_mapping(utility_type)
+        mapping = _utility_node_mapping(utility_type, None, channel_hint)
     if mapping is None:
         return False
 
@@ -1610,6 +1611,81 @@ def _extract_numeric_default(value):
     if isinstance(value, (int, float, bool)):
         return value
     return None
+
+
+def _utility_attr_channel_suffix(attr_name):
+    """Extract XYZ/RGB channel suffix from a utility attribute name."""
+    if not attr_name:
+        return None
+    normalized = str(attr_name)
+    if "." in normalized:
+        normalized = normalized.split(".")[-1]
+    normalized = normalized.strip()
+    for suffix in ("X", "Y", "Z", "R", "G", "B"):
+        if normalized.endswith(suffix):
+            return suffix
+    return None
+
+
+def _resolve_utility_channel_suffix(utility_type, channel_hint):
+    """Normalize channel hints per utility family."""
+    hint = str(channel_hint).upper() if channel_hint else None
+
+    rgb_nodes = {"blendColors", "condition", "clamp"}
+    xyz_nodes = {"multiplyDivide", "reverse", "setRange"}
+
+    rgb_from_xyz = {"X": "R", "Y": "G", "Z": "B"}
+    xyz_from_rgb = {"R": "X", "G": "Y", "B": "Z"}
+
+    if utility_type in rgb_nodes:
+        if hint in rgb_from_xyz:
+            hint = rgb_from_xyz[hint]
+        return hint if hint in {"R", "G", "B"} else "R"
+
+    if utility_type in xyz_nodes:
+        if hint in xyz_from_rgb:
+            hint = xyz_from_rgb[hint]
+        return hint if hint in {"X", "Y", "Z"} else "X"
+
+    return ""
+
+
+def _detect_utility_channel_hint(instruction, utility_type):
+    """Detect likely channel suffix from utility instruction values/links."""
+    candidates = []
+    values = instruction.get("values") or {}
+    candidates.extend(values.keys())
+
+    for link in instruction.get("inbound_links", []):
+        for endpoint in ("destination", "source"):
+            plug = link.get(endpoint)
+            if not plug:
+                continue
+            attr = plug.split(".", 1)[1] if "." in plug else plug
+            candidates.append(attr)
+
+    for link in instruction.get("outbound_links", []):
+        for endpoint in ("destination", "source"):
+            plug = link.get(endpoint)
+            if not plug:
+                continue
+            attr = plug.split(".", 1)[1] if "." in plug else plug
+            candidates.append(attr)
+
+    channel_counts = {}
+    first_seen = {}
+    for index, attr_name in enumerate(candidates):
+        suffix = _utility_attr_channel_suffix(attr_name)
+        if suffix is None:
+            continue
+        channel_counts[suffix] = channel_counts.get(suffix, 0) + 1
+        first_seen.setdefault(suffix, index)
+
+    if not channel_counts:
+        return _resolve_utility_channel_suffix(utility_type, None)
+
+    ranked = sorted(channel_counts.items(), key=lambda item: (-item[1], first_seen[item[0]]))
+    return _resolve_utility_channel_suffix(utility_type, ranked[0][0])
 
 
 def _utility_operation_values(utility_type, operation):
@@ -1854,8 +1930,9 @@ def _auto_link_manifest_connections(controller, manifest, pin_map):
         _add_link_if_possible(controller, source, destination)
 
 
-def _utility_node_mapping(utility_type, operation=None):
+def _utility_node_mapping(utility_type, operation=None, channel_hint=None):
     """Map Maya utility node types to RigVM math unit signatures."""
+    channel = _resolve_utility_channel_suffix(utility_type, channel_hint)
     operation_modes = {
         "multiplyDivide": {
             1: [
@@ -1926,10 +2003,10 @@ def _utility_node_mapping(utility_type, operation=None):
                 "/Script/RigVM.RigVMFunction_MathFloatNegate",
                 "/Script/ControlRig.RigUnit_MathFloatNegate",
             ],
-            "pin_map": [("inputX", "Value"), ("input.inputX", "Value")],
+            "pin_map": [(f"input{channel}", "Value"), (f"input.input{channel}", "Value")],
             "aliases": {
-                "input.inputX": "inputX",
-                "output.outputX": "outputX",
+                f"input.input{channel}": f"input{channel}",
+                f"output.output{channel}": f"output{channel}",
             },
             "output_pin": "Result",
         },
@@ -1938,11 +2015,11 @@ def _utility_node_mapping(utility_type, operation=None):
                 operation_index,
                 operation_modes["multiplyDivide"][1],
             ),
-            "pin_map": [("input1X", "A"), ("input2X", "B")],
+            "pin_map": [(f"input1{channel}", "A"), (f"input2{channel}", "B")],
             "aliases": {
-                "input1.input1X": "input1X",
-                "input2.input2X": "input2X",
-                "output.outputX": "outputX",
+                f"input1.input1{channel}": f"input1{channel}",
+                f"input2.input2{channel}": f"input2{channel}",
+                f"output.output{channel}": f"output{channel}",
             },
             "output_pin": "Result",
         },
@@ -1974,11 +2051,11 @@ def _utility_node_mapping(utility_type, operation=None):
                 "/Script/RigVM.RigVMFunction_MathFloatLerp",
                 "/Script/ControlRig.RigUnit_MathFloatLerp",
             ],
-            "pin_map": [("color1R", "A"), ("color2R", "B"), ("blender", "T")],
+            "pin_map": [(f"color1{channel}", "A"), (f"color2{channel}", "B"), ("blender", "T")],
             "aliases": {
-                "color1.color1R": "color1R",
-                "color2.color2R": "color2R",
-                "output.outputR": "outputR",
+                f"color1.color1{channel}": f"color1{channel}",
+                f"color2.color2{channel}": f"color2{channel}",
+                f"output.output{channel}": f"output{channel}",
             },
             "output_pin": "Result",
         },
@@ -1990,13 +2067,13 @@ def _utility_node_mapping(utility_type, operation=None):
             "pin_map": [
                 ("firstTerm", "FirstTerm"),
                 ("secondTerm", "SecondTerm"),
-                ("colorIfFalseR", "False"),
-                ("colorIfTrueR", "True"),
+                (f"colorIfFalse{channel}", "False"),
+                (f"colorIfTrue{channel}", "True"),
             ],
             "aliases": {
-                "colorIfFalse.colorIfFalseR": "colorIfFalseR",
-                "colorIfTrue.colorIfTrueR": "colorIfTrueR",
-                "outColor.outColorR": "outColorR",
+                f"colorIfFalse.colorIfFalse{channel}": f"colorIfFalse{channel}",
+                f"colorIfTrue.colorIfTrue{channel}": f"colorIfTrue{channel}",
+                f"outColor.outColor{channel}": f"outColor{channel}",
             },
             "operation_pins": ["Operation", "Op", "ConditionOperation", "Comparison", "Condition"],
             "output_pin": "Result",
@@ -2006,12 +2083,12 @@ def _utility_node_mapping(utility_type, operation=None):
                 "/Script/RigVM.RigVMFunction_MathFloatClamp",
                 "/Script/ControlRig.RigUnit_MathFloatClamp",
             ],
-            "pin_map": [("inputR", "Value"), ("minR", "Min"), ("maxR", "Max")],
+            "pin_map": [(f"input{channel}", "Value"), (f"min{channel}", "Min"), (f"max{channel}", "Max")],
             "aliases": {
-                "input.inputR": "inputR",
-                "min.minR": "minR",
-                "max.maxR": "maxR",
-                "output.outputR": "outputR",
+                f"input.input{channel}": f"input{channel}",
+                f"min.min{channel}": f"min{channel}",
+                f"max.max{channel}": f"max{channel}",
+                f"output.output{channel}": f"output{channel}",
             },
             "output_pin": "Result",
         },
@@ -2021,19 +2098,19 @@ def _utility_node_mapping(utility_type, operation=None):
                 "/Script/ControlRig.RigUnit_MathFloatRemap",
             ],
             "pin_map": [
-                ("valueX", "Value"),
-                ("oldMinX", "SourceMinimum"),
-                ("oldMaxX", "SourceMaximum"),
-                ("minX", "TargetMinimum"),
-                ("maxX", "TargetMaximum"),
+                (f"value{channel}", "Value"),
+                (f"oldMin{channel}", "SourceMinimum"),
+                (f"oldMax{channel}", "SourceMaximum"),
+                (f"min{channel}", "TargetMinimum"),
+                (f"max{channel}", "TargetMaximum"),
             ],
             "aliases": {
-                "value.valueX": "valueX",
-                "oldMin.oldMinX": "oldMinX",
-                "oldMax.oldMaxX": "oldMaxX",
-                "min.minX": "minX",
-                "max.maxX": "maxX",
-                "outValue.outValueX": "outValueX",
+                f"value.value{channel}": f"value{channel}",
+                f"oldMin.oldMin{channel}": f"oldMin{channel}",
+                f"oldMax.oldMax{channel}": f"oldMax{channel}",
+                f"min.min{channel}": f"min{channel}",
+                f"max.max{channel}": f"max{channel}",
+                f"outValue.outValue{channel}": f"outValue{channel}",
             },
             "output_pin": "Result",
         },
