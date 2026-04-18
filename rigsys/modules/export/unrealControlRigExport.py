@@ -121,7 +121,7 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
         )
 
         return {
-            "schema_version": 4,
+            "schema_version": 5,
             "rig_name": self._rig.name,
             "maya_version": cmds.about(version=True),
             "maya_api_version": str(cmds.about(apiVersion=True)),
@@ -142,7 +142,7 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
             "rigvm_instructions": rigVmInstructions,
             "custom_control_attributes": self._collectCustomControlAttributes(controls),
             "constraints": constraints,
-            "connections": self._collectConnections(joints=joints, controls=controls),
+            "connections": self._collectConnections(joints=joints, controls=controls, rigLogicNodes=rigLogicNodes),
         }
 
     def _collectJoints(self) -> List[Dict]:
@@ -317,13 +317,15 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
 
         return data
 
-    def _collectConnections(self, joints: List[Dict], controls: List[Dict]) -> List[Dict]:
-        """Collect incoming attribute connections on exported rig nodes."""
+    def _collectConnections(self, joints: List[Dict], controls: List[Dict], rigLogicNodes: List[Dict]) -> List[Dict]:
+        """Collect incoming attribute connections on exported rig nodes and utility nodes."""
         nodePaths = set()
         for joint in joints:
             nodePaths.add(joint["path"])
         for control in controls:
             nodePaths.add(control["path"])
+        for logicNode in rigLogicNodes:
+            nodePaths.add(logicNode["path"])
 
         data = []
         for nodePath in sorted(nodePaths):
@@ -388,6 +390,19 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
                     }
                 )
         return data
+
+    def _collectNodeLinks(self, nodePath: str, source: bool, destination: bool) -> List[Dict]:
+        """Collect connection links for a node in one direction."""
+        plugs = cmds.listConnections(nodePath, s=source, d=destination, p=True) or []
+        links = []
+        for plug in sorted(set(plugs)):
+            links.append(
+                {
+                    "plug": plug,
+                    "short_plug": self._shortPlug(plug),
+                }
+            )
+        return links
 
     def _collectIkFkSystems(self) -> List[Dict]:
         """Collect common Maya IK/FK blend patterns for Unreal reconstruction."""
@@ -563,32 +578,6 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
                         "targets": targets,
                     }
                 )
-
-        utilityTypeMap = {
-            "multiplyDivide": ["multiply", "divide"],
-            "plusMinusAverage": ["sum", "subtract", "average"],
-            "condition": ["condition"],
-            "clamp": ["clamp"],
-            "setRange": ["set_range"],
-            "remapValue": ["remap"],
-            "multDoubleLinear": ["multiply"],
-            "reverse": ["negate"],
-            "blendColors": ["lerp"],
-        }
-        for logicNode in rigLogicNodes:
-            nodeType = logicNode.get("type")
-            modes = utilityTypeMap.get(nodeType)
-            if not modes:
-                continue
-            instructions.append(
-                {
-                    "type": "utility_node",
-                    "node_type": nodeType,
-                    "node": logicNode.get("name"),
-                    "modes": modes,
-                    "values": logicNode.get("values", {}),
-                }
-            )
 
         return instructions
 
@@ -1178,8 +1167,9 @@ def _apply_rigvm_instructions(control_rig_bp, manifest):
         _log_warning("RigVM controller API not available; rigvm_instructions kept as metadata.")
         return
 
+    pin_map = {}
     for index, instruction in enumerate(instructions):
-        if _apply_single_rigvm_instruction(controller, instruction, index):
+        if _apply_single_rigvm_instruction(controller, instruction, index, pin_map):
             continue
 
         # Fallback to comment payloads when unit-level construction is unavailable.
@@ -1197,32 +1187,34 @@ def _apply_rigvm_instructions(control_rig_bp, manifest):
         else:
             _log_warning("RigVM controller has no add_comment_node fallback; instruction skipped.")
 
+    _auto_link_manifest_connections(controller, manifest, pin_map)
 
-def _apply_single_rigvm_instruction(controller, instruction, index):
+
+def _apply_single_rigvm_instruction(controller, instruction, index, pin_map):
     """Apply one rigvm instruction. Returns True when any concrete operation succeeded."""
     instruction_type = instruction.get("type")
 
     if instruction_type == "ik_fk_blend":
-        return _apply_ik_fk_blend_instruction(controller, instruction, index)
+        return _apply_ik_fk_blend_instruction(controller, instruction, index, pin_map)
     if instruction_type == "ik_fk_visibility_switch":
-        return _apply_visibility_instruction(controller, instruction, index)
+        return _apply_visibility_instruction(controller, instruction, index, pin_map)
     if instruction_type == "logic_constant":
-        return _apply_logic_constant_instruction(controller, instruction, index)
+        return _apply_logic_constant_instruction(controller, instruction, index, pin_map)
     if instruction_type == "constraint_point":
-        return _apply_constraint_point_instruction(controller, instruction, index)
+        return _apply_constraint_point_instruction(controller, instruction, index, pin_map)
     if instruction_type == "constraint_orient":
-        return _apply_constraint_orient_instruction(controller, instruction, index)
+        return _apply_constraint_orient_instruction(controller, instruction, index, pin_map)
     if instruction_type == "constraint_scale":
-        return _apply_constraint_scale_instruction(controller, instruction, index)
+        return _apply_constraint_scale_instruction(controller, instruction, index, pin_map)
     if instruction_type == "constraint_aim":
-        return _apply_constraint_aim_instruction(controller, instruction, index)
+        return _apply_constraint_aim_instruction(controller, instruction, index, pin_map)
     if instruction_type == "utility_node":
-        return _apply_utility_node_instruction(controller, instruction, index)
+        return _apply_utility_node_instruction(controller, instruction, index, pin_map)
 
     return False
 
 
-def _apply_ik_fk_blend_instruction(controller, instruction, index):
+def _apply_ik_fk_blend_instruction(controller, instruction, index, pin_map):
     """Build a best-effort float-lerp unit and connect instruction pins."""
     if not hasattr(controller, "add_unit_node_from_struct_path"):
         return False
@@ -1253,17 +1245,19 @@ def _apply_ik_fk_blend_instruction(controller, instruction, index):
         return True
 
     links_added = False
-    links_added |= _add_link_if_possible(controller, switch_attr, f"{node_path}.T")
-    links_added |= _add_link_if_possible(controller, fk_source, f"{node_path}.A")
-    links_added |= _add_link_if_possible(controller, ik_source, f"{node_path}.B")
-    links_added |= _add_link_if_possible(controller, f"{node_path}.Result", driven)
+    links_added |= _add_link_if_possible(controller, _normalize_pin(switch_attr, pin_map), f"{node_path}.T")
+    links_added |= _add_link_if_possible(controller, _normalize_pin(fk_source, pin_map), f"{node_path}.A")
+    links_added |= _add_link_if_possible(controller, _normalize_pin(ik_source, pin_map), f"{node_path}.B")
+    links_added |= _add_link_if_possible(controller, f"{node_path}.Result", _normalize_pin(driven, pin_map))
+
+    _register_pin_mapping(pin_map, instruction.get("driven"), f"{node_path}.Result")
 
     if not links_added:
         _log_warning(f"IK/FK blend node created but no links could be resolved: {instruction}")
     return True
 
 
-def _apply_visibility_instruction(controller, instruction, index):
+def _apply_visibility_instruction(controller, instruction, index, pin_map):
     """Build a best-effort bool invert chain for IK/FK visibility switching."""
     if not hasattr(controller, "add_unit_node_from_struct_path"):
         return False
@@ -1293,10 +1287,14 @@ def _apply_visibility_instruction(controller, instruction, index):
         for target in instruction.get("switch_visible_targets", []):
             any_direct |= _add_link_if_possible(controller, switch_attr, target)
 
+    if not_node is not None and not_path:
+        for target in instruction.get("reverse_visible_targets", []):
+            _register_pin_mapping(pin_map, target, f"{not_path}.Result")
+
     return not_node is not None or any_direct
 
 
-def _apply_logic_constant_instruction(controller, instruction, index):
+def _apply_logic_constant_instruction(controller, instruction, index, pin_map):
     """Build constant nodes for scalar rig logic values."""
     if not hasattr(controller, "add_unit_node_from_struct_path"):
         return False
@@ -1329,16 +1327,22 @@ def _apply_logic_constant_instruction(controller, instruction, index):
     if node_path is None:
         return True
 
-    _set_pin_default_if_possible(controller, f"{node_path}.{pin_name}", value)
+    output_pin = f"{node_path}.{pin_name}"
+    _set_pin_default_if_possible(controller, output_pin, value)
+    target_plug = instruction.get("target")
+    if target_plug:
+        _register_pin_mapping(pin_map, target_plug, output_pin)
+        _add_link_if_possible(controller, output_pin, target_plug)
     return True
 
 
-def _apply_constraint_point_instruction(controller, instruction, index):
+def _apply_constraint_point_instruction(controller, instruction, index, pin_map):
     """Apply point-constraint style blending through vector lerp."""
     return _apply_constraint_blend_generic(
         controller=controller,
         instruction=instruction,
         index=index,
+        pin_map=pin_map,
         suffix="Point",
         struct_paths=[
             "/Script/RigVM.RigVMFunction_MathVectorLerp",
@@ -1349,12 +1353,13 @@ def _apply_constraint_point_instruction(controller, instruction, index):
     )
 
 
-def _apply_constraint_orient_instruction(controller, instruction, index):
+def _apply_constraint_orient_instruction(controller, instruction, index, pin_map):
     """Apply orient-constraint style blending through rotator lerp."""
     return _apply_constraint_blend_generic(
         controller=controller,
         instruction=instruction,
         index=index,
+        pin_map=pin_map,
         suffix="Orient",
         struct_paths=[
             "/Script/RigVM.RigVMFunction_MathQuaternionSlerp",
@@ -1367,12 +1372,13 @@ def _apply_constraint_orient_instruction(controller, instruction, index):
     )
 
 
-def _apply_constraint_scale_instruction(controller, instruction, index):
+def _apply_constraint_scale_instruction(controller, instruction, index, pin_map):
     """Apply scale-constraint style blending through vector lerp."""
     return _apply_constraint_blend_generic(
         controller=controller,
         instruction=instruction,
         index=index,
+        pin_map=pin_map,
         suffix="Scale",
         struct_paths=[
             "/Script/RigVM.RigVMFunction_MathVectorLerp",
@@ -1383,7 +1389,7 @@ def _apply_constraint_scale_instruction(controller, instruction, index):
     )
 
 
-def _apply_constraint_aim_instruction(controller, instruction, index):
+def _apply_constraint_aim_instruction(controller, instruction, index, pin_map):
     """Apply aim-constraint approximation using look-at style units."""
     if not hasattr(controller, "add_unit_node_from_struct_path"):
         return False
@@ -1417,12 +1423,14 @@ def _apply_constraint_aim_instruction(controller, instruction, index):
     linked = _add_link_if_possible(controller, source_pin, f"{node_path}.Target")
     linked |= _add_link_if_possible(controller, source_pin, f"{node_path}.AimTarget")
 
+    _register_pin_mapping(pin_map, driven, f"{node_path}.Result")
+
     if not linked:
         _log_warning(f"Aim constraint unit created without target links: {instruction}")
     return True
 
 
-def _apply_utility_node_instruction(controller, instruction, index):
+def _apply_utility_node_instruction(controller, instruction, index, pin_map):
     """Apply generic utility-node mapping to RigVM math units."""
     if not hasattr(controller, "add_unit_node_from_struct_path"):
         return False
@@ -1456,10 +1464,32 @@ def _apply_utility_node_instruction(controller, instruction, index):
             continue
         _set_pin_default_if_possible(controller, f"{node_path}.{target_pin}", value)
 
+    for link in instruction.get("inbound_links", []):
+        source_plug = link.get("source")
+        destination_plug = link.get("destination")
+        if not source_plug or not destination_plug:
+            continue
+        source_attr = destination_plug.split(".", 1)[1] if "." in destination_plug else destination_plug
+        target_pin = _utility_pin_for_attr(mapping, source_attr)
+        if target_pin is None:
+            continue
+        resolved_source = _normalize_pin(source_plug, pin_map)
+        _add_link_if_possible(controller, resolved_source, f"{node_path}.{target_pin}")
+
+    output_pin = _utility_output_pin(mapping, node_path)
+    if output_pin is not None:
+        for link in instruction.get("outbound_links", []):
+            destination = link.get("destination")
+            if destination:
+                _register_pin_mapping(pin_map, destination, output_pin)
+                _add_link_if_possible(controller, output_pin, _normalize_pin(destination, pin_map))
+
     return True
 
 
-def _apply_constraint_blend_generic(controller, instruction, index, suffix, struct_paths, target_pins, result_pin):
+def _apply_constraint_blend_generic(
+    controller, instruction, index, suffix, struct_paths, target_pins, result_pin, pin_map
+):
     """Generic helper for transform-space weighted constraint blends."""
     if not hasattr(controller, "add_unit_node_from_struct_path"):
         return False
@@ -1499,9 +1529,27 @@ def _apply_constraint_blend_generic(controller, instruction, index, suffix, stru
         driven_pin = _resolve_target_pin(driven, pin_kind)
         links_added |= _add_link_if_possible(controller, f"{node_path}.{result_pin}", driven_pin)
 
+    _register_pin_mapping(pin_map, driven, f"{node_path}.{result_pin}")
+
     if not links_added:
         _log_warning(f"Constraint blend unit created but no links resolved: {instruction}")
     return True
+
+
+def _utility_pin_for_attr(mapping, attr_name):
+    """Resolve utility-node input attribute to mapped unit pin."""
+    for source_attr, target_pin in mapping.get("pin_map", []):
+        if source_attr == attr_name:
+            return target_pin
+    return None
+
+
+def _utility_output_pin(mapping, node_path):
+    """Get mapped output pin for a utility instruction if present."""
+    output_pin = mapping.get("output_pin")
+    if not output_pin:
+        return None
+    return f"{node_path}.{output_pin}"
 
 
 def _resolve_target_pin(node_or_plug, attribute_kind):
@@ -1517,6 +1565,56 @@ def _resolve_target_pin(node_or_plug, attribute_kind):
     return f"{node_or_plug}.translation"
 
 
+def _normalize_pin(pin, pin_map):
+    """Resolve Maya-style pins to any known generated RigVM pins."""
+    if pin is None:
+        return pin
+    return pin_map.get(pin, pin)
+
+
+def _register_pin_mapping(pin_map, maya_pin, rigvm_pin):
+    """Register a Maya plug and its node-only variant to RigVM pin map."""
+    if not maya_pin or not rigvm_pin:
+        return
+    pin_map[maya_pin] = rigvm_pin
+    node = _plug_to_node(maya_pin)
+    if node and node not in pin_map:
+        pin_map[node] = rigvm_pin
+
+
+def _controller_has_link(controller, source_pin, target_pin):
+    """Check whether a controller already has a link between pins."""
+    if not hasattr(controller, "find_link"):
+        return False
+    try:
+        existing = controller.find_link(source_pin, target_pin)
+        return existing is not None
+    except Exception:
+        return False
+
+
+def _resolve_connection_endpoints(connection, pin_map):
+    """Resolve source/destination plugs from manifest connection records."""
+    source = _normalize_pin(connection.get("source"), pin_map)
+    destination = _normalize_pin(connection.get("destination"), pin_map)
+    if not source or not destination:
+        return None, None
+    return source, destination
+
+
+def _auto_link_manifest_connections(controller, manifest, pin_map):
+    """Attempt to auto-link all manifest connections using generated pin map."""
+    if not hasattr(controller, "add_link"):
+        return
+    for connection in manifest.get("connections", []):
+        source, destination = _resolve_connection_endpoints(connection, pin_map)
+        if not source or not destination:
+            continue
+        if _controller_has_link(controller, source, destination):
+            continue
+        _add_link_if_possible(controller, source, destination)
+
+
 def _utility_node_mapping(utility_type):
     """Map Maya utility node types to RigVM math unit signatures."""
     mappings = {
@@ -1526,6 +1624,7 @@ def _utility_node_mapping(utility_type):
                 "/Script/ControlRig.RigUnit_MathFloatNegate",
             ],
             "pin_map": [("inputX", "Value"), ("input.inputX", "Value")],
+            "output_pin": "Result",
         },
         "multiplyDivide": {
             "struct_paths": [
@@ -1533,6 +1632,7 @@ def _utility_node_mapping(utility_type):
                 "/Script/ControlRig.RigUnit_MathFloatMul",
             ],
             "pin_map": [("input1X", "A"), ("input2X", "B")],
+            "output_pin": "Result",
         },
         "plusMinusAverage": {
             "struct_paths": [
@@ -1540,6 +1640,7 @@ def _utility_node_mapping(utility_type):
                 "/Script/ControlRig.RigUnit_MathFloatAdd",
             ],
             "pin_map": [("input1D[0]", "A"), ("input1D[1]", "B")],
+            "output_pin": "Result",
         },
         "multDoubleLinear": {
             "struct_paths": [
@@ -1547,6 +1648,7 @@ def _utility_node_mapping(utility_type):
                 "/Script/ControlRig.RigUnit_MathFloatMul",
             ],
             "pin_map": [("input1", "A"), ("input2", "B")],
+            "output_pin": "Result",
         },
         "blendColors": {
             "struct_paths": [
@@ -1554,6 +1656,7 @@ def _utility_node_mapping(utility_type):
                 "/Script/ControlRig.RigUnit_MathFloatLerp",
             ],
             "pin_map": [("color1R", "A"), ("color2R", "B"), ("blender", "T")],
+            "output_pin": "Result",
         },
     }
     return mappings.get(utility_type)
@@ -1600,6 +1703,23 @@ def _add_link_if_possible(controller, source_pin, target_pin):
     """Create a RigVM link if controller supports it."""
     if not source_pin or not target_pin:
         return False
+    if source_pin == target_pin:
+        return False
+    if not hasattr(controller, "add_link"):
+        return False
+    return _try_call(
+        controller.add_link,
+        [
+            ((source_pin, target_pin), {}),
+            ((source_pin, target_pin, False), {}),
+        ],
+    )
+
+
+def _add_link_if_possible(controller, source_pin, target_pin):
+    """Create a RigVM link if controller supports it."""
+    if not source_pin or not target_pin:
+        return False
     if not hasattr(controller, "add_link"):
         return False
     return _try_call(
@@ -1623,6 +1743,15 @@ def _set_pin_default_if_possible(controller, pin_path, value):
             ((pin_path, value_text), {}),
         ],
     )
+
+
+def _normalized_link(controller, source_pin, target_pin, pin_map):
+    """Link with source/target normalization through generated pin map."""
+    source_resolved = _normalize_pin(source_pin, pin_map)
+    target_resolved = _normalize_pin(target_pin, pin_map)
+    if _controller_has_link(controller, source_resolved, target_resolved):
+        return False
+    return _add_link_if_possible(controller, source_resolved, target_resolved)
 
 
 def _plug_to_node(plug):

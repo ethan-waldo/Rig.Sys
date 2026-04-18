@@ -61,7 +61,8 @@ Current parity pipeline behavior:
 - Applies best-effort parent-constraint parenting reconstruction.
 - Detects common IK/FK blend + visibility switch systems and stores them as structured metadata for iterative graph reconstruction passes.
 - Converts `rigvm_instructions` into best-effort RigVM unit/link construction for common IK/FK blend/visibility, scalar logic-constant patterns, non-parent constraint blends (point/orient/scale/aim), and mapped utility nodes (`reverse`, `multiplyDivide`, `plusMinusAverage`, `multDoubleLinear`, `blendColors`) when Unreal controller APIs are available.
-- Persists high-fidelity rig metadata (`constraints`, `connections`, `rig_logic_nodes`, `ik_fk_systems`) onto the generated asset metadata for post-processing tooling.
+- Persists high-fidelity rig metadata (`constraints`, `connections`, `rig_logic_nodes`, `ik_fk_systems`, `rigvm_instructions`) onto the generated asset metadata for post-processing tooling.
+- Performs automatic post-pass connection linking by mapping Maya plugs to generated RigVM pins and replaying manifest connections where APIs permit.
 - Falls back to RigVM comment-node payload handoff when Unreal RigVM unit/link APIs are unavailable in the running version.
 
 ## Motion module parenting

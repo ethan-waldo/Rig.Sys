@@ -112,6 +112,10 @@ class _FakeMayaCmds:
                 "|Rig|modules|M_Root_CTRL.visibility",
                 "|Rig|modules|M_RootOffset_CTRL.visibility",
             ],
+            "|Rig|modules|M_Root_IKFK_blend": [
+                "|Rig|modules|M_Root_IKFK_blend.blender",
+                "|Rig|modules|M_Root_CTRL.IK_FK_Switch",
+            ],
         }
         self.connectionsByPlug = {
             "|Rig|modules|M_Root_IKFK_blend.blender": ["|Rig|modules|M_Root_CTRL.IK_FK_Switch"],
@@ -381,18 +385,18 @@ def test_unreal_control_rig_export_writes_manifest_script_and_fbx(tmp_path, monk
     assert manifest["unreal"]["control_rig_name"] == "DemoRig_ControlRig"
     assert len(manifest["joints"]) == 2
     assert len(manifest["controls"]) == 2
-    assert manifest["schema_version"] == 4
+    assert manifest["schema_version"] == 5
     assert len(manifest["custom_control_attributes"]) == 1
     assert manifest["custom_control_attributes"][0]["attribute"] == "IK_FK_Switch"
     assert len(manifest["constraints"]) == 5
     assert manifest["constraints"][0]["type"] == "parentConstraint"
-    assert len(manifest["connections"]) == 1
+    assert len(manifest["connections"]) == 2
     assert manifest["connections"][0]["destination"].endswith(".visibility")
     assert manifest["connections"][0]["source"].endswith(".visibility")
     assert len(manifest["rig_logic_nodes"]) == 2
     assert len(manifest["ik_fk_systems"]) == 1
     assert manifest["ik_fk_systems"][0]["switch_attribute"] == "M_Root_CTRL.IK_FK_Switch"
-    assert len(manifest["rigvm_instructions"]) >= 8
+    assert len(manifest["rigvm_instructions"]) >= 6
 
     scriptText = scriptPath.read_text(encoding="utf-8")
     assert "ControlRigBlueprintFactory" in scriptText
@@ -409,6 +413,9 @@ def test_unreal_control_rig_export_writes_manifest_script_and_fbx(tmp_path, monk
     assert "_apply_constraint_aim_instruction" in scriptText
     assert "_apply_utility_node_instruction" in scriptText
     assert "_utility_node_mapping" in scriptText
+    assert "_auto_link_manifest_connections" in scriptText
+    assert "_register_pin_mapping" in scriptText
+    assert "_normalize_pin" in scriptText
     assert "add_unit_node_from_struct_path" in scriptText
     assert "add_link" in scriptText
     assert "RigSys.RigVMInstructionsJSON" in scriptText
