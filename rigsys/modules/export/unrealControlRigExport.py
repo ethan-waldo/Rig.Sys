@@ -1716,21 +1716,6 @@ def _add_link_if_possible(controller, source_pin, target_pin):
     )
 
 
-def _add_link_if_possible(controller, source_pin, target_pin):
-    """Create a RigVM link if controller supports it."""
-    if not source_pin or not target_pin:
-        return False
-    if not hasattr(controller, "add_link"):
-        return False
-    return _try_call(
-        controller.add_link,
-        [
-            ((source_pin, target_pin), {}),
-            ((source_pin, target_pin, False), {}),
-        ],
-    )
-
-
 def _set_pin_default_if_possible(controller, pin_path, value):
     """Set default value for a pin when available."""
     if not hasattr(controller, "set_pin_default_value"):
