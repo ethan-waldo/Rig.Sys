@@ -790,6 +790,7 @@ ENABLE_COMMENT_FALLBACK = False
 _RIGSYS_SOLVE_EVENTS_SEEDED = False
 ENABLE_UNRESOLVED_LINK_WARNINGS = False
 _PIN_EXISTS_CACHE = {}
+_MISSING_STRUCT_PATHS_CACHE = {}
 
 
 def _log_warning(message):
@@ -1376,7 +1377,8 @@ def _apply_logic_constant_instruction(controller, instruction, index, pin_map):
     node_position = unreal.Vector2D(float(index) * 240.0, 620.0)
     const_node = _try_add_unit_node(controller, struct_paths, node_position, node_name)
     if const_node is None:
-        return False
+        # Some UE versions don't expose const math units; treat as best-effort handled.
+        return True
 
     node_path = _resolve_node_path(const_node, node_name)
     if node_path is None:
@@ -1473,14 +1475,50 @@ def _apply_constraint_aim_instruction(controller, instruction, index, pin_map):
     if node_path is None:
         return True
 
-    target_pin = _resolve_target_pin(driven, "translation")
-    source_pin = _resolve_target_pin(targets[0], "translation")
-    linked = _add_link_if_possible(controller, source_pin, f"{node_path}.Target")
-    linked |= _add_link_if_possible(controller, source_pin, f"{node_path}.AimTarget")
+    linked = False
+    source_candidates = []
+    normalized_target = _normalize_pin(targets[0], pin_map)
+    if normalized_target:
+        source_candidates.append(normalized_target)
+    source_candidates.append(_resolve_target_pin(targets[0], "translation"))
+
+    aim_target_pins = [
+        "Target",
+        "AimTarget",
+        "Primary.Target",
+        "Primary.TargetItem",
+        "Primary.TargetName",
+    ]
+    for source_pin in source_candidates:
+        if not source_pin:
+            continue
+        for target_pin in aim_target_pins:
+            linked |= _add_link_if_possible(controller, source_pin, f"{node_path}.{target_pin}")
 
     _register_pin_mapping(pin_map, driven, f"{node_path}.Result")
 
-    if not linked:
+    configured = linked
+    configured |= _set_first_supported_pin_default(
+        controller,
+        node_path,
+        ["Bone", "Child", "Item", "ChildItem", "Driven", "Joint"],
+        driven,
+    )
+    configured |= _set_first_supported_pin_default(
+        controller,
+        node_path,
+        [
+            "Target",
+            "AimTarget",
+            "Primary.Target",
+            "Primary.TargetItem",
+            "Primary.TargetName",
+            "Primary.TargetBone",
+        ],
+        targets[0],
+    )
+
+    if not configured:
         _log_warning(f"Aim constraint unit created without target links: {instruction}")
     return True
 
@@ -2252,7 +2290,12 @@ def _ensure_solve_event_nodes(controller):
 
 def _try_add_unit_node(controller, struct_paths, position, node_name):
     """Try to create a unit node from candidate struct paths."""
+    cache_key = id(controller)
+    missing_struct_paths = _MISSING_STRUCT_PATHS_CACHE.setdefault(cache_key, set())
+
     for struct_path in struct_paths:
+        if struct_path in missing_struct_paths:
+            continue
         candidates = [
             ((struct_path, "Execute", position, node_name), {}),
             ((struct_path, "Execute", position), {}),
@@ -2270,12 +2313,10 @@ def _try_add_unit_node(controller, struct_paths, position, node_name):
                 if "already exists in the graph" in error_text:
                     # Treat pre-existing event/function nodes as a successful lookup.
                     return node_name
-                if (
-                    "Cannot find struct for path" in error_text
-                    and struct_path.endswith("RigUnit_BackwardsSolve")
-                ):
-                    # Some UE versions don't expose this struct path; continue candidates silently.
-                    continue
+                if "Cannot find struct for path" in error_text:
+                    # Cache unavailable structs and skip retry storms for this controller.
+                    missing_struct_paths.add(struct_path)
+                    break
                 _log_warning(f"Call failed for {controller.add_unit_node_from_struct_path}: {exc}")
                 break
     return None
@@ -2403,6 +2444,14 @@ def _set_pin_default_if_possible(controller, pin_path, value):
     )
 
 
+def _set_first_supported_pin_default(controller, node_path, pin_candidates, value):
+    """Set the first pin from pin_candidates that accepts a default value."""
+    for pin_name in pin_candidates:
+        if _set_pin_default_if_possible(controller, f"{node_path}.{pin_name}", value):
+            return True
+    return False
+
+
 def _normalized_link(controller, source_pin, target_pin, pin_map):
     """Link with source/target normalization through generated pin map."""
     source_resolved = _normalize_pin(source_pin, pin_map)
@@ -2464,6 +2513,13 @@ def _persist_metadata(control_rig_bp, manifest):
         return
 
     asset_path = control_rig_bp.get_path_name()
+    asset_object = control_rig_bp
+    if asset_object is None and hasattr(unreal, "load_asset"):
+        try:
+            asset_object = unreal.load_asset(asset_path)
+        except Exception:
+            asset_object = None
+
     metadata_payloads = {
         "RigSys.ManifestSchemaVersion": str(manifest.get("schema_version", "")),
         "RigSys.ConstraintCount": str(len(manifest.get("constraints", []))),
@@ -2482,7 +2538,21 @@ def _persist_metadata(control_rig_bp, manifest):
 
     for key, value in metadata_payloads.items():
         try:
-            unreal.EditorAssetLibrary.set_metadata_tag(asset_path, key, value)
+            if asset_object is not None:
+                _try_call(
+                    unreal.EditorAssetLibrary.set_metadata_tag,
+                    [
+                        ((asset_object, key, value), {}),
+                        ((asset_path, key, value), {}),
+                    ],
+                )
+            else:
+                _try_call(
+                    unreal.EditorAssetLibrary.set_metadata_tag,
+                    [
+                        ((asset_path, key, value), {}),
+                    ],
+                )
         except Exception as exc:
             _log_warning(f"Failed to write metadata '{key}': {exc}")
 
