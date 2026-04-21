@@ -789,6 +789,7 @@ MANIFEST_PATH = __MANIFEST_PATH__
 ENABLE_COMMENT_FALLBACK = False
 _RIGSYS_SOLVE_EVENTS_SEEDED = False
 ENABLE_UNRESOLVED_LINK_WARNINGS = False
+_PIN_EXISTS_CACHE = {}
 
 
 def _log_warning(message):
@@ -2305,6 +2306,10 @@ def _add_link_if_possible(controller, source_pin, target_pin):
         return False
     if source_pin == target_pin:
         return False
+    if _is_unresolved_scene_plug(source_pin) or _is_unresolved_scene_plug(target_pin):
+        return False
+    if not _pin_exists(controller, source_pin) or not _pin_exists(controller, target_pin):
+        return False
     if not hasattr(controller, "add_link"):
         return False
     return _try_call(
@@ -2315,6 +2320,73 @@ def _add_link_if_possible(controller, source_pin, target_pin):
         ],
         log_exceptions=False,
     )
+
+
+def _is_unresolved_scene_plug(pin_path):
+    """Identify likely Maya scene plugs that were not mapped to RigVM pins."""
+    if not isinstance(pin_path, str) or "." not in pin_path:
+        return False
+
+    node_name, attr_name = pin_path.split(".", 1)
+    if not node_name or not attr_name:
+        return False
+
+    if node_name.startswith(("RigSys_", "/Script/", "Hierarchy::")):
+        return False
+    if "::" in node_name or "/" in node_name:
+        return False
+
+    attr_lower = attr_name.lower()
+    unresolved_attrs = {
+        "translation",
+        "rotation",
+        "scale",
+        "scale3d",
+        "ik_fk_switch",
+        "visibility",
+    }
+    return attr_lower in unresolved_attrs
+
+
+def _pin_exists(controller, pin_path):
+    """Best-effort pin existence check to avoid expensive failed add_link calls."""
+    if not pin_path:
+        return False
+
+    cache_key = (id(controller), pin_path)
+    if cache_key in _PIN_EXISTS_CACHE:
+        return _PIN_EXISTS_CACHE[cache_key]
+
+    exists = None
+    if hasattr(controller, "find_pin"):
+        try:
+            exists = controller.find_pin(pin_path) is not None
+        except Exception:
+            exists = None
+
+    if exists is None and hasattr(controller, "contains_pin"):
+        try:
+            exists = bool(controller.contains_pin(pin_path))
+        except Exception:
+            exists = None
+
+    if exists is None and hasattr(controller, "get_graph"):
+        try:
+            graph = controller.get_graph()
+        except Exception:
+            graph = None
+        if graph is not None and hasattr(graph, "find_pin"):
+            try:
+                exists = graph.find_pin(pin_path) is not None
+            except Exception:
+                exists = None
+
+    if exists is None:
+        # If the API cannot introspect pins, keep previous behavior.
+        exists = True
+
+    _PIN_EXISTS_CACHE[cache_key] = exists
+    return exists
 
 
 def _set_pin_default_if_possible(controller, pin_path, value):
