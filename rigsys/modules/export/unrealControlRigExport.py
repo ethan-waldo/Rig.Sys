@@ -787,6 +787,8 @@ import unreal
 
 MANIFEST_PATH = __MANIFEST_PATH__
 ENABLE_COMMENT_FALLBACK = False
+_RIGSYS_SOLVE_EVENTS_SEEDED = False
+ENABLE_UNRESOLVED_LINK_WARNINGS = False
 
 
 def _log_warning(message):
@@ -807,7 +809,7 @@ def _ensure_content_path(path):
         editor_asset_library.make_directory(path)
 
 
-def _try_call(method, candidates):
+def _try_call(method, candidates, log_exceptions=True):
     for args, kwargs in candidates:
         try:
             method(*args, **kwargs)
@@ -815,7 +817,8 @@ def _try_call(method, candidates):
         except TypeError:
             continue
         except Exception as exc:
-            _log_warning(f"Call failed for {method}: {exc}")
+            if log_exceptions:
+                _log_warning(f"Call failed for {method}: {exc}")
             return False
     return False
 
@@ -1047,8 +1050,9 @@ def _apply_constraints(control_rig_bp, manifest):
             continue
 
         if ctype in {"pointConstraint", "orientConstraint", "scaleConstraint", "aimConstraint"}:
-            if _apply_constraint_instruction(control_rig_bp, constraint, index):
-                continue
+            # Non-parent constraints are emitted into manifest["rigvm_instructions"] and
+            # reconstructed centrally in _apply_rigvm_instructions to avoid duplicate graph passes.
+            continue
 
         # Remaining unsupported variants stay as metadata for follow-up.
         _log_warning(
@@ -2218,7 +2222,10 @@ def _utility_node_mapping(utility_type, operation=None, channel_hint=None):
 
 def _ensure_solve_event_nodes(controller):
     """Try to seed forward/backward solve event nodes when available."""
+    global _RIGSYS_SOLVE_EVENTS_SEEDED
     if not hasattr(controller, "add_unit_node_from_struct_path"):
+        return
+    if _RIGSYS_SOLVE_EVENTS_SEEDED:
         return
 
     _try_add_unit_node(
@@ -2239,23 +2246,37 @@ def _ensure_solve_event_nodes(controller):
         position=unreal.Vector2D(-900.0, 220.0),
         node_name="RigSys_BackwardSolve",
     )
+    _RIGSYS_SOLVE_EVENTS_SEEDED = True
 
 
 def _try_add_unit_node(controller, struct_paths, position, node_name):
     """Try to create a unit node from candidate struct paths."""
     for struct_path in struct_paths:
-        added = _try_call(
-            controller.add_unit_node_from_struct_path,
-            [
-                ((struct_path, "Execute", position, node_name), {}),
-                ((struct_path, "Execute", position), {}),
-                ((struct_path, position), {}),
-                ((struct_path,), {}),
-            ],
-        )
-        if added:
-            # Try to resolve by node name first; fallback returns None if unavailable.
-            return node_name
+        candidates = [
+            ((struct_path, "Execute", position, node_name), {}),
+            ((struct_path, "Execute", position), {}),
+            ((struct_path, position), {}),
+            ((struct_path,), {}),
+        ]
+        for args, kwargs in candidates:
+            try:
+                controller.add_unit_node_from_struct_path(*args, **kwargs)
+                return node_name
+            except TypeError:
+                continue
+            except Exception as exc:
+                error_text = str(exc)
+                if "already exists in the graph" in error_text:
+                    # Treat pre-existing event/function nodes as a successful lookup.
+                    return node_name
+                if (
+                    "Cannot find struct for path" in error_text
+                    and struct_path.endswith("RigUnit_BackwardsSolve")
+                ):
+                    # Some UE versions don't expose this struct path; continue candidates silently.
+                    continue
+                _log_warning(f"Call failed for {controller.add_unit_node_from_struct_path}: {exc}")
+                break
     return None
 
 
@@ -2292,6 +2313,7 @@ def _add_link_if_possible(controller, source_pin, target_pin):
             ((source_pin, target_pin), {}),
             ((source_pin, target_pin, False), {}),
         ],
+        log_exceptions=False,
     )
 
 
