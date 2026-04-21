@@ -806,9 +806,8 @@ def _load_manifest():
 
 
 def _ensure_content_path(path):
-    editor_asset_library = unreal.EditorAssetLibrary()
-    if not editor_asset_library.does_directory_exist(path):
-        editor_asset_library.make_directory(path)
+    if not unreal.EditorAssetLibrary.does_directory_exist(path):
+        unreal.EditorAssetLibrary.make_directory(path)
 
 
 def _try_call(method, candidates, log_exceptions=True):
