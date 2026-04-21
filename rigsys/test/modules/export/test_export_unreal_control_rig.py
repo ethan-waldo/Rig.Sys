@@ -427,6 +427,8 @@ def test_unreal_control_rig_export_writes_manifest_script_and_fbx(tmp_path, monk
     assert "_auto_link_manifest_connections" in scriptText
     assert "_register_pin_mapping" in scriptText
     assert "_normalize_pin" in scriptText
+    assert "set_editor_property(\"translation\"" in scriptText
+    assert "unreal.Transform(" in scriptText
     assert "add_unit_node_from_struct_path" in scriptText
     assert "add_link" in scriptText
     assert "RigVMFunction_MathFloatDiv" in scriptText

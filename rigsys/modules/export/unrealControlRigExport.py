@@ -820,11 +820,48 @@ def _try_call(method, candidates):
 
 
 def _to_transform(translation, rotation, scale):
-    return unreal.Transform(
-        rotation=unreal.Rotator(rotation[0], rotation[1], rotation[2]),
-        translation=unreal.Vector(translation[0], translation[1], translation[2]),
-        scale3d=unreal.Vector(scale[0], scale[1], scale[2]),
-    )
+    rotator = unreal.Rotator(rotation[0], rotation[1], rotation[2])
+    translation_vec = unreal.Vector(translation[0], translation[1], translation[2])
+    scale_vec = unreal.Vector(scale[0], scale[1], scale[2])
+
+    # Unreal Python signatures vary by version; attempt known constructors first.
+    constructors = [
+        lambda: unreal.Transform(rotation=rotator, translation=translation_vec, scale3d=scale_vec),
+        lambda: unreal.Transform(translation=translation_vec, rotation=rotator, scale3d=scale_vec),
+        lambda: unreal.Transform(translation_vec, rotator, scale_vec),
+        lambda: unreal.Transform(rotator, translation_vec, scale_vec),
+        lambda: unreal.Transform(),
+    ]
+
+    last_error = None
+    for index, build_transform in enumerate(constructors):
+        try:
+            transform = build_transform()
+        except Exception as exc:
+            last_error = exc
+            continue
+
+        # Final fallback constructor requires property assignment.
+        if index == len(constructors) - 1:
+            property_pairs = [
+                ("translation", translation_vec),
+                ("location", translation_vec),
+                ("rotation", rotator),
+                ("scale3d", scale_vec),
+                ("scale", scale_vec),
+            ]
+            for property_name, property_value in property_pairs:
+                try:
+                    if hasattr(transform, "set_editor_property"):
+                        transform.set_editor_property(property_name, property_value)
+                    else:
+                        setattr(transform, property_name, property_value)
+                except Exception:
+                    continue
+
+        return transform
+
+    raise RuntimeError(f"Unable to build unreal.Transform for this API: {last_error}")
 
 
 def _import_fbx_if_present(manifest):
