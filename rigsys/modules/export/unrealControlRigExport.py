@@ -786,6 +786,7 @@ import unreal
 
 
 MANIFEST_PATH = __MANIFEST_PATH__
+ENABLE_COMMENT_FALLBACK = False
 
 
 def _log_warning(message):
@@ -1209,13 +1210,15 @@ def _apply_rigvm_instructions(control_rig_bp, manifest):
         _log_warning("RigVM controller API not available; rigvm_instructions kept as metadata.")
         return
 
+    _ensure_solve_event_nodes(controller)
+
     pin_map = {}
     for index, instruction in enumerate(instructions):
         if _apply_single_rigvm_instruction(controller, instruction, index, pin_map):
             continue
 
-        # Fallback to comment payloads when unit-level construction is unavailable.
-        if hasattr(controller, "add_comment_node"):
+        # Optional fallback to comment payloads when unit-level construction is unavailable.
+        if ENABLE_COMMENT_FALLBACK and hasattr(controller, "add_comment_node"):
             payload = json.dumps(instruction, sort_keys=True)
             position = unreal.Vector2D(float(index) * 12.0, 0.0)
             _try_call(
@@ -1227,7 +1230,7 @@ def _apply_rigvm_instructions(control_rig_bp, manifest):
                 ],
             )
         else:
-            _log_warning("RigVM controller has no add_comment_node fallback; instruction skipped.")
+            _log_warning(f"Unsupported rigvm instruction skipped: {instruction.get('type')}")
 
     _auto_link_manifest_connections(controller, manifest, pin_map)
 
@@ -1250,6 +1253,8 @@ def _apply_single_rigvm_instruction(controller, instruction, index, pin_map):
         return _apply_constraint_scale_instruction(controller, instruction, index, pin_map)
     if instruction_type == "constraint_aim":
         return _apply_constraint_aim_instruction(controller, instruction, index, pin_map)
+    if instruction_type == "constraint_blend":
+        return _apply_constraint_blend_instruction(controller, instruction, index, pin_map)
     if instruction_type == "utility_node":
         return _apply_utility_node_instruction(controller, instruction, index, pin_map)
 
@@ -1473,6 +1478,36 @@ def _apply_constraint_aim_instruction(controller, instruction, index, pin_map):
     if not linked:
         _log_warning(f"Aim constraint unit created without target links: {instruction}")
     return True
+
+
+def _apply_constraint_blend_instruction(controller, instruction, index, pin_map):
+    """Back-compat mapper for legacy constraint_blend instruction payloads."""
+    blend_type = instruction.get("constraint_type")
+    if blend_type == "pointConstraint":
+        mapped = {
+            "type": "constraint_point",
+            "driven": instruction.get("driven"),
+            "targets": instruction.get("targets", []),
+            "switch_attribute": instruction.get("switch_attribute"),
+        }
+        return _apply_constraint_point_instruction(controller, mapped, index, pin_map)
+    if blend_type == "orientConstraint":
+        mapped = {
+            "type": "constraint_orient",
+            "driven": instruction.get("driven"),
+            "targets": instruction.get("targets", []),
+            "switch_attribute": instruction.get("switch_attribute"),
+        }
+        return _apply_constraint_orient_instruction(controller, mapped, index, pin_map)
+    if blend_type == "scaleConstraint":
+        mapped = {
+            "type": "constraint_scale",
+            "driven": instruction.get("driven"),
+            "targets": instruction.get("targets", []),
+            "switch_attribute": instruction.get("switch_attribute"),
+        }
+        return _apply_constraint_scale_instruction(controller, mapped, index, pin_map)
+    return False
 
 
 def _apply_utility_node_instruction(controller, instruction, index, pin_map):
@@ -2179,6 +2214,31 @@ def _utility_node_mapping(utility_type, operation=None, channel_hint=None):
         },
     }
     return mappings.get(utility_type)
+
+
+def _ensure_solve_event_nodes(controller):
+    """Try to seed forward/backward solve event nodes when available."""
+    if not hasattr(controller, "add_unit_node_from_struct_path"):
+        return
+
+    _try_add_unit_node(
+        controller=controller,
+        struct_paths=[
+            "/Script/ControlRig.RigUnit_BeginExecution",
+            "/Script/ControlRig.RigUnit_PrepareForExecution",
+        ],
+        position=unreal.Vector2D(-900.0, 0.0),
+        node_name="RigSys_ForwardSolve",
+    )
+    _try_add_unit_node(
+        controller=controller,
+        struct_paths=[
+            "/Script/ControlRig.RigUnit_InverseExecution",
+            "/Script/ControlRig.RigUnit_BackwardsSolve",
+        ],
+        position=unreal.Vector2D(-900.0, 220.0),
+        node_name="RigSys_BackwardSolve",
+    )
 
 
 def _try_add_unit_node(controller, struct_paths, position, node_name):
