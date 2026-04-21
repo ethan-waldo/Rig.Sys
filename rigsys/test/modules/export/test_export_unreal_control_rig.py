@@ -413,6 +413,8 @@ def test_unreal_control_rig_export_writes_manifest_script_and_fbx(tmp_path, monk
     assert "_apply_rigvm_instructions" in scriptText
     assert "_apply_ik_fk_blend_instruction" in scriptText
     assert "_apply_visibility_instruction" in scriptText
+    assert "not_path = None" in scriptText
+    assert "_normalize_pin(switch_attr, pin_map)" in scriptText
     assert "_apply_constraint_point_instruction" in scriptText
     assert "_apply_constraint_orient_instruction" in scriptText
     assert "_apply_constraint_scale_instruction" in scriptText

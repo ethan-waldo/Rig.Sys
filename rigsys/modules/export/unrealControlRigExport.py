@@ -1306,6 +1306,7 @@ def _apply_visibility_instruction(controller, instruction, index, pin_map):
 
     node_position = unreal.Vector2D(float(index) * 240.0, 420.0)
     node_name = f"RigSys_IKFKVisibility_{index}"
+    not_path = None
     not_node = _try_add_unit_node(
         controller=controller,
         struct_paths=[
@@ -1315,19 +1316,21 @@ def _apply_visibility_instruction(controller, instruction, index, pin_map):
         position=node_position,
         node_name=node_name,
     )
-    if not_node is None:
+    if not_node is not None:
         not_path = _resolve_node_path(not_node, node_name)
         switch_attr = instruction.get("switch_attribute")
         if switch_attr and not_path:
-            _add_link_if_possible(controller, switch_attr, f"{not_path}.Value")
+            _add_link_if_possible(controller, _normalize_pin(switch_attr, pin_map), f"{not_path}.Value")
             for target in instruction.get("reverse_visible_targets", []):
-                _add_link_if_possible(controller, f"{not_path}.Result", target)
+                _add_link_if_possible(controller, f"{not_path}.Result", _normalize_pin(target, pin_map))
 
     any_direct = False
     switch_attr = instruction.get("switch_attribute")
     if switch_attr:
         for target in instruction.get("switch_visible_targets", []):
-            any_direct |= _add_link_if_possible(controller, switch_attr, target)
+            any_direct |= _add_link_if_possible(
+                controller, _normalize_pin(switch_attr, pin_map), _normalize_pin(target, pin_map)
+            )
 
     if not_node is not None and not_path:
         for target in instruction.get("reverse_visible_targets", []):
