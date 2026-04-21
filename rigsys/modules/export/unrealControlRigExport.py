@@ -1303,7 +1303,7 @@ def _apply_ik_fk_blend_instruction(controller, instruction, index, pin_map):
 
     _register_pin_mapping(pin_map, instruction.get("driven"), f"{node_path}.Result")
 
-    if not links_added:
+    if not links_added and ENABLE_UNRESOLVED_LINK_WARNINGS:
         _log_warning(f"IK/FK blend node created but no links could be resolved: {instruction}")
     return True
 
@@ -1641,7 +1641,7 @@ def _apply_constraint_blend_generic(
 
     _register_pin_mapping(pin_map, driven, f"{node_path}.{result_pin}")
 
-    if not links_added:
+    if not links_added and ENABLE_UNRESOLVED_LINK_WARNINGS:
         _log_warning(f"Constraint blend unit created but no links resolved: {instruction}")
     return True
 
