@@ -136,3 +136,58 @@ testRunner.runTests(pattern="test_rig")
 ```
 
 Based on the naming convention of the tests, you can single out specific types of modules (i.e. "test_export" or "test_motion") to run all tests of that module type.
+
+## Maya to Unreal Control Rig translation
+
+Rig.Sys now includes a translation pipeline that converts motion modules into a JSON payload that an Unreal Python script can consume to auto-build a Control Rig hierarchy.
+
+### Design
+
+- Translation logic is separated by module type under `rigsys/translation/modules/` (one translator file per module type).
+- A registry in `rigsys/translation/registry.py` picks the right translator for each module.
+- The payload schema is defined in `rigsys/translation/models.py`.
+
+### Maya export target integration
+
+You can now add Control Rig translation as an export target directly in your existing rig script (same pattern as FBX/MB):
+
+```python
+import rigsys.modules.export as export
+
+self.exportModules = {
+    "FBXExport": export.FBXExport(
+        self,
+        exportPath="C:/temp/ExampleRig.fbx",
+        exportAll=True,
+    ),
+    "ControlRigExport": export.ControlRigExport(
+        self,
+        exportPath="C:/temp/ExampleRig_controlrig.json",
+    ),
+}
+```
+
+`ControlRigExport` writes a JSON payload translated from motion modules using the per-module translators in `rigsys/translation/modules/`.
+
+If you prefer ad-hoc export outside export modules, `example/maya_translate_rig_to_controlrig.py` is still available.
+
+### Unreal import + auto-build script
+
+Use `example/unreal_import_model_and_build_controlrig.py` inside Unreal Python:
+
+```python
+from example.unreal_import_model_and_build_controlrig import run
+
+run(
+    payload_json_path="C:/temp/example_controlrig_payload.json",
+    model_fbx_path="C:/temp/example_character.fbx",
+    destination_path="/Game/AutoRig",
+)
+```
+
+This script:
+
+1. Imports your FBX as a skeletal mesh.
+2. Creates a new Control Rig asset.
+3. Builds module/proxy bones and translated controls (with control transform placement and parent relationships).
+4. Materializes module settings into additional Control Rig controls (for example: FK offsets/reverse + segment drivers, limb pole-vector + deform chain + IK floor + foot-roll controls, quad-limb auto-roll controls, hand offset/digit/meta controls, ribbon meta controls, point-target reference controls, and lips/eye segment + follow/attachment controls).
