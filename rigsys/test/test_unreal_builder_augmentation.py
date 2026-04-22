@@ -505,7 +505,7 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         point_module = next(module for module in plan["modules"] if module["module_name"] == "M_Target")
         self.assertTrue(
             any(
-                pin_default["pin_path"].endswith("SetProxy_1.Weight") and pin_default["value"] == "0.7"
+                pin_default["pin_path"].endswith("FWD_Set_1.Weight") and pin_default["value"] == "0.7"
                 for pin_default in point_module["pin_defaults"]
             )
         )
@@ -517,4 +517,11 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
                 if pin_default["pin_path"].endswith(".Item")
             )
         )
+        self.assertIn("forward", plan["stages"])
+        self.assertIn("backward", plan["stages"])
+        self.assertIn("construction", plan["stages"])
+        self.assertGreater(plan["stages"]["forward"]["links"], 0)
+        self.assertGreater(plan["stages"]["backward"]["links"], 0)
+        self.assertGreater(plan["stages"]["construction"]["links"], 0)
+        self.assertTrue(any("source_candidates" in link for link in plan["links"]))
 

@@ -1268,6 +1268,109 @@ def _point_target_behavior_bindings(module: Dict[str, Any], default_target_bone_
     return output
 
 
+def _execution_stage_specs() -> Dict[str, Dict[str, Any]]:
+    return {
+        "construction": {
+            "tag": "CNS",
+            "event_name": "Construction",
+            "entry_sources": [
+                "PrepareForExecution.ExecuteContext",
+                "PreBeginExecution.ExecuteContext",
+                "Construction.ExecuteContext",
+            ],
+        },
+        "forward": {
+            "tag": "FWD",
+            "event_name": "ForwardSolve",
+            "entry_sources": [
+                "BeginExecution.ExecuteContext",
+                "ForwardsSolve.ExecuteContext",
+                "ForwardSolve.ExecuteContext",
+            ],
+        },
+        "backward": {
+            "tag": "BWD",
+            "event_name": "BackwardSolve",
+            "entry_sources": [
+                "InverseExecution.ExecuteContext",
+                "BackwardsSolve.ExecuteContext",
+                "BackwardSolve.ExecuteContext",
+            ],
+        },
+    }
+
+
+def _make_stage_nodes_for_binding(
+    *,
+    stage_name: str,
+    stage_tag: str,
+    graph_module_name: str,
+    index: int,
+    binding: Dict[str, Any],
+) -> Dict[str, Any]:
+    source_control = binding["source_control"]
+    target_item_type = binding.get("target_item_type", "Bone")
+    target_item_name = binding["target_item_name"]
+    source_space = str(binding.get("source_space", "GlobalSpace"))
+    target_space = str(binding.get("target_space", "GlobalSpace"))
+    weight = float(binding.get("weight", 1.0))
+    get_node = f"{graph_module_name}_{stage_tag}_Get_{index}"
+    set_node = f"{graph_module_name}_{stage_tag}_Set_{index}"
+    base_x = 200.0 + (index * 380.0)
+    stage_y = {
+        "construction": -300.0,
+        "forward": 200.0,
+        "backward": 700.0,
+    }.get(stage_name, 200.0)
+
+    if stage_name == "forward":
+        get_struct = "/Script/ControlRig.RigUnit_GetControlTransform"
+        get_defaults = [
+            {"pin_path": f"{get_node}.Control", "value": str(source_control)},
+            {"pin_path": f"{get_node}.Space", "value": source_space},
+        ]
+        set_item = f'(Type={target_item_type},Name="{target_item_name}")'
+        set_b_initial = "False"
+        set_weight = str(weight)
+    else:
+        get_struct = "/Script/ControlRig.RigUnit_GetTransform"
+        get_defaults = [
+            {"pin_path": f"{get_node}.Item", "value": f'(Type={target_item_type},Name="{target_item_name}")'},
+            {"pin_path": f"{get_node}.Space", "value": target_space},
+            {"pin_path": f"{get_node}.bInitial", "value": "False"},
+        ]
+        set_item = f'(Type=Control,Name="{source_control}")'
+        set_b_initial = "True" if stage_name == "construction" else "False"
+        set_weight = "1.0"
+
+    set_defaults = [
+        {"pin_path": f"{set_node}.Item", "value": set_item},
+        {"pin_path": f"{set_node}.Space", "value": source_space},
+        {"pin_path": f"{set_node}.Weight", "value": set_weight},
+        {"pin_path": f"{set_node}.bInitial", "value": set_b_initial},
+    ]
+    return {
+        "nodes": [
+            {
+                "name": get_node,
+                "struct_path": get_struct,
+                "method_name": "Execute",
+                "position": [base_x, stage_y],
+            },
+            {
+                "name": set_node,
+                "struct_path": "/Script/ControlRig.RigUnit_SetTransform",
+                "method_name": "Execute",
+                "position": [base_x + 220.0, stage_y],
+            },
+        ],
+        "pin_defaults": get_defaults + set_defaults,
+        "transform_link": {"source": f"{get_node}.Transform", "target": f"{set_node}.Value"},
+        "set_exec_pin": f"{set_node}.ExecuteContext",
+        "stage": stage_name,
+    }
+
+
 def build_module_behavior_graph_plan(module: Dict[str, Any]) -> Dict[str, Any]:
     """Build a RigVM graph node/link plan for one module.
 
@@ -1304,55 +1407,55 @@ def build_module_behavior_graph_plan(module: Dict[str, Any]) -> Dict[str, Any]:
                 if warning not in warnings:
                     warnings.append(warning)
     nodes: List[Dict[str, Any]] = []
-    links: List[Dict[str, str]] = []
+    links: List[Dict[str, Any]] = []
     pin_defaults: List[Dict[str, str]] = []
-    exec_source_pin = "BeginExecution.ExecuteContext"
+    stage_summaries: Dict[str, Dict[str, int]] = {}
+    event_nodes = [
+        {
+            "name": spec.get("event_name", stage_name.title()),
+            "stage": stage_name,
+            "entry_sources": list(spec.get("entry_sources", [])),
+        }
+        for stage_name, spec in _execution_stage_specs().items()
+    ]
 
-    for index, binding in enumerate(bindings):
-        control_name = binding["source_control"]
-        target_item_name = binding["target_item_name"]
-        target_item_type = binding.get("target_item_type", "Bone")
-        source_space = binding.get("source_space", "GlobalSpace")
-        target_space = binding.get("target_space", "GlobalSpace")
-        weight = float(binding.get("weight", 1.0))
-        get_node = f"{graph_module_name}_GetCtrl_{index}"
-        set_node = f"{graph_module_name}_SetProxy_{index}"
+    for stage_name, stage_spec in _execution_stage_specs().items():
+        stage_exec_pin: Optional[str] = None
+        stage_link_count = 0
+        stage_node_count = 0
+        for index, binding in enumerate(bindings):
+            stage_nodes = _make_stage_nodes_for_binding(
+                stage_name=stage_name,
+                stage_tag=stage_spec["tag"],
+                graph_module_name=graph_module_name,
+                index=index,
+                binding=binding,
+            )
+            nodes.extend(stage_nodes["nodes"])
+            pin_defaults.extend(stage_nodes["pin_defaults"])
+            links.append(stage_nodes["transform_link"])
+            stage_link_count += 1
+            stage_node_count += len(stage_nodes["nodes"])
 
-        nodes.append(
-            {
-                "name": get_node,
-                "struct_path": "/Script/ControlRig.RigUnit_GetControlTransform",
-                "method_name": "Execute",
-                "position": [200.0 + (index * 380.0), 200.0],
-            }
-        )
-        nodes.append(
-            {
-                "name": set_node,
-                "struct_path": "/Script/ControlRig.RigUnit_SetTransform",
-                "method_name": "Execute",
-                "position": [420.0 + (index * 380.0), 200.0],
-            }
-        )
+            exec_link_target = stage_nodes["set_exec_pin"]
+            if stage_exec_pin is None:
+                links.append(
+                    {
+                        "source_candidates": list(stage_spec["entry_sources"]),
+                        "target": exec_link_target,
+                        "stage": stage_name,
+                    }
+                )
+                stage_link_count += 1
+            else:
+                links.append({"source": stage_exec_pin, "target": exec_link_target, "stage": stage_name})
+                stage_link_count += 1
+            stage_exec_pin = exec_link_target
 
-        pin_defaults.extend(
-            [
-                {"pin_path": f"{get_node}.Control", "value": str(control_name)},
-                {"pin_path": f"{get_node}.Space", "value": str(source_space)},
-                {"pin_path": f"{set_node}.Item", "value": f'(Type={target_item_type},Name="{target_item_name}")'},
-                {"pin_path": f"{set_node}.Space", "value": str(target_space)},
-                {"pin_path": f"{set_node}.Weight", "value": str(weight)},
-                {"pin_path": f"{set_node}.bInitial", "value": "False"},
-            ]
-        )
-
-        links.extend(
-            [
-                {"source": f"{get_node}.Transform", "target": f"{set_node}.Value"},
-                {"source": exec_source_pin, "target": f"{set_node}.ExecuteContext"},
-            ]
-        )
-        exec_source_pin = f"{set_node}.ExecuteContext"
+        stage_summaries[stage_name] = {
+            "nodes": stage_node_count,
+            "links": stage_link_count,
+        }
 
     return {
         "module_name": module_name,
@@ -1360,6 +1463,8 @@ def build_module_behavior_graph_plan(module: Dict[str, Any]) -> Dict[str, Any]:
         "links": links,
         "pin_defaults": pin_defaults,
         "warnings": warnings,
+        "stages": stage_summaries,
+        "event_nodes": event_nodes,
     }
 
 
@@ -1367,23 +1472,38 @@ def build_behavior_graph_plan(translated_payload: Dict[str, Any]) -> Dict[str, A
     """Build aggregate RigVM graph plan from translated payload."""
     module_plans = [build_module_behavior_graph_plan(module) for module in translated_payload.get("modules", [])]
     nodes: List[Dict[str, Any]] = []
-    links: List[Dict[str, str]] = []
+    links: List[Dict[str, Any]] = []
     pin_defaults: List[Dict[str, str]] = []
     warnings: List[str] = []
+    stages: Dict[str, Dict[str, int]] = {}
+    event_nodes: List[Dict[str, Any]] = []
+    seen_event_nodes = set()
     for module_plan in module_plans:
         nodes.extend(module_plan["nodes"])
         links.extend(module_plan["links"])
         pin_defaults.extend(module_plan["pin_defaults"])
+        for stage_name, stage_data in module_plan.get("stages", {}).items():
+            aggregate = stages.setdefault(stage_name, {"nodes": 0, "links": 0})
+            aggregate["nodes"] += int(stage_data.get("nodes", 0))
+            aggregate["links"] += int(stage_data.get("links", 0))
         for warning in module_plan.get("warnings", []):
             warning_message = f"{module_plan.get('module_name', 'Module')}: {warning}"
             if warning_message not in warnings:
                 warnings.append(warning_message)
+        for event_node in module_plan.get("event_nodes", []):
+            event_key = (event_node.get("name"), tuple(event_node.get("entry_sources", [])))
+            if event_key in seen_event_nodes:
+                continue
+            seen_event_nodes.add(event_key)
+            event_nodes.append(event_node)
     return {
         "modules": module_plans,
         "nodes": nodes,
         "links": links,
         "pin_defaults": pin_defaults,
         "warnings": warnings,
+        "stages": stages,
+        "event_nodes": event_nodes,
     }
 
 
@@ -1530,10 +1650,26 @@ def apply_behavior_graph_to_control_rig(control_rig, translated_payload: Dict[st
 
     links_added = 0
     for link in plan["links"]:
-        if _controller_add_link(controller, link["source"], link["target"]):
-            links_added += 1
-        else:
-            warnings.append(f"Failed to add link {link['source']} -> {link['target']}")
+        if "source" in link:
+            if _controller_add_link(controller, link["source"], link["target"]):
+                links_added += 1
+            else:
+                warnings.append(f"Failed to add link {link['source']} -> {link['target']}")
+            continue
+
+        source_candidates = list(link.get("source_candidates", []))
+        target = link.get("target")
+        if not source_candidates or not target:
+            warnings.append(f"Invalid link spec: {link}")
+            continue
+        linked = False
+        for source_candidate in source_candidates:
+            if _controller_add_link(controller, source_candidate, target):
+                links_added += 1
+                linked = True
+                break
+        if not linked:
+            warnings.append(f"Failed to add link from any {source_candidates} -> {target}")
 
     return {
         "nodes_added": nodes_added,
