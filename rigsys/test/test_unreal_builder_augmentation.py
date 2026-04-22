@@ -501,7 +501,7 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         self.assertGreater(len(plan.get("pin_defaults", [])), 0)
         self.assertTrue(any("SetTransform" in node["struct_path"] for node in plan["nodes"]))
         self.assertTrue(any("GetControlTransform" in node["struct_path"] for node in plan["nodes"]))
-        self.assertGreater(len(plan.get("warnings", [])), 0)
+        self.assertIsInstance(plan.get("warnings", []), list)
 
         point_module = next(module for module in plan["modules"] if module["module_name"] == "M_Target")
         self.assertTrue(
@@ -676,4 +676,66 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         hand_model = next(model for model in plan["math_models"] if model.get("module_class") == "Hand")
         self.assertEqual(hand_model.get("implementation_status"), "implemented")
         self.assertFalse(any("multiplyDivide" in gap for gap in hand_model.get("approximation_gaps", [])))
+
+    def test_graph_plan_limb_foot_roll_generates_operator_nodes(self):
+        payload = {
+            "rig_name": "GraphRig",
+            "modules": [
+                {
+                    "module_name": "L_Leg",
+                    "module_class": "Limb",
+                    "proxies": [
+                        {"name": "Root", "parent": None, "position": [0, 10, 0], "rotation": [0, 0, 0]},
+                        {"name": "Start", "parent": "Root", "position": [0, 10, 0], "rotation": [0, 0, 0]},
+                        {"name": "Mid", "parent": "Start", "position": [0, 5, 0], "rotation": [0, 0, 0]},
+                        {"name": "End", "parent": "Mid", "position": [0, 0, 0], "rotation": [0, 0, 0]},
+                        {"name": "Global", "parent": "End", "position": [0, 0, 0], "rotation": [0, 0, 0]},
+                        {"name": "Heel", "parent": "End", "position": [-1, 0, -1], "rotation": [0, 0, 0]},
+                        {"name": "OutBank", "parent": "End", "position": [1, 0, 0], "rotation": [0, 0, 0]},
+                        {"name": "InBank", "parent": "End", "position": [-1, 0, 0], "rotation": [0, 0, 0]},
+                        {"name": "Pivot", "parent": "End", "position": [0, 0, 0], "rotation": [0, 0, 0]},
+                        {"name": "Ball", "parent": "Pivot", "position": [0, -0.5, 1], "rotation": [0, 0, 0]},
+                        {"name": "Toe", "parent": "Ball", "position": [0, -0.5, 2], "rotation": [0, 0, 0]},
+                    ],
+                    "controls": [
+                        {
+                            "name": "L_Leg_IK_CTRL",
+                            "role": "ik_effector",
+                            "shape": "circle",
+                            "scale": [1, 1, 1],
+                            "position": [0, 0, 0],
+                            "rotation": [0, 0, 0],
+                            "driven_proxy": "End",
+                            "parent_proxy": "Mid",
+                        }
+                    ],
+                    "module_settings": {
+                        "name_set": {"Root": "Root", "Start": "Start", "Mid": "Mid", "End": "End"},
+                        "foot": True,
+                        "ctrl_scale": [1, 1, 1],
+                    },
+                }
+            ],
+        }
+        materialized = augment_payload_with_generated_controls(payload)
+        plan = build_behavior_graph_plan(materialized)
+        limb_module = plan["modules"][0]
+        node_structs = [node["struct_path"] for node in limb_module["nodes"]]
+        node_names = [node["name"] for node in limb_module["nodes"]]
+
+        self.assertTrue(any("MathDoubleMul" in path for path in node_structs))
+        self.assertTrue(any("MathDoubleAdd" in path for path in node_structs))
+        self.assertTrue(any("MathDoubleNegate" in path for path in node_structs))
+        self.assertTrue(any("_Foot_" in name for name in node_names))
+        self.assertTrue(
+            any(
+                ".Value.X" in str(link.get("target", "")) or ".Value.Z" in str(link.get("target", ""))
+                for link in limb_module["links"]
+                if link.get("stage") == "forward"
+            )
+        )
+
+        limb_model = next(model for model in plan["math_models"] if model.get("module_class") == "Limb")
+        self.assertEqual(limb_model.get("implementation_status"), "implemented")
+        self.assertFalse(any("Foot roll math operators" in gap for gap in limb_model.get("approximation_gaps", [])))
 

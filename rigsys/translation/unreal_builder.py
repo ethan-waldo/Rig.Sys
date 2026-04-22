@@ -1305,6 +1305,39 @@ def _limb_ik_fk_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any]])
     return output
 
 
+def _limb_foot_roll_operator_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    settings = module.get("module_settings", {})
+    if not bool(settings.get("foot", False)):
+        return bindings
+
+    foot_profile = {
+        "Toe": {"operator": "inverse_toe_roll", "input_channel": "rotateX", "target_axis": "X", "factor": -1.0},
+        "Ball": {"operator": "ball_roll_compensation", "input_channel": "rotateX", "target_axis": "X", "factor": 1.0},
+        "InBank": {"operator": "inbank_compensation", "input_channel": "rotateZ", "target_axis": "Z", "factor": 1.0},
+        "OutBank": {"operator": "outbank_compensation", "input_channel": "rotateZ", "target_axis": "Z", "factor": 1.0},
+    }
+    output: List[Dict[str, Any]] = []
+    for binding in bindings:
+        if str(binding.get("source_role", "")) != "foot_roll":
+            output.append(binding)
+            continue
+
+        source_control = str(binding.get("source_control", ""))
+        data = dict(binding)
+        data["target_channel"] = "rotation"
+        for proxy_name, profile in foot_profile.items():
+            if f"_{proxy_name}_Foot_CTRL" not in source_control:
+                continue
+            data["foot_roll_operator"] = profile["operator"]
+            data["foot_roll_input_channel"] = profile["input_channel"]
+            data["foot_roll_target_axis"] = profile["target_axis"]
+            data["foot_roll_factor"] = float(profile["factor"])
+            data["math_mode"] = f"limb_foot_{profile['operator']}"
+            break
+        output.append(data)
+    return output
+
+
 def _point_target_channel_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     settings = module.get("module_settings", {})
     constrain_type = str(settings.get("constrain_type") or "parent").lower()
@@ -1461,6 +1494,90 @@ def _hand_operator_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any
     return output
 
 
+def _limb_foot_roll_operator_nodes(
+    *,
+    stage_name: str,
+    graph_module_name: str,
+    stage_tag: str,
+    index: int,
+    binding: Dict[str, Any],
+    base_x: float,
+    stage_y: float,
+    set_node: str,
+    set_defaults: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if stage_name != "forward":
+        return {"nodes": [], "links": []}
+    if not binding.get("foot_roll_operator"):
+        return {"nodes": [], "links": []}
+
+    operator = str(binding.get("foot_roll_operator"))
+    source_control = str(binding.get("source_control", ""))
+    input_channel = str(binding.get("foot_roll_input_channel") or "rotateX")
+    target_axis = str(binding.get("foot_roll_target_axis") or "X").upper()
+    factor = float(binding.get("foot_roll_factor", 1.0))
+
+    foot_get = f"{graph_module_name}_{stage_tag}_Foot_{index}_{operator}_Get"
+    foot_mul = f"{graph_module_name}_{stage_tag}_Foot_{index}_{operator}_Mul"
+    foot_add = f"{graph_module_name}_{stage_tag}_Foot_{index}_{operator}_Add"
+    foot_neg = f"{graph_module_name}_{stage_tag}_Foot_{index}_{operator}_Neg"
+    nodes = [
+        {
+            "name": foot_get,
+            "struct_path": "/Script/ControlRig.RigUnit_GetControlFloat",
+            "method_name": "Execute",
+            "position": [base_x + 110.0, stage_y + 80.0],
+        },
+        {
+            "name": foot_mul,
+            "struct_path": "/Script/RigVM.RigVMFunction_MathDoubleMul",
+            "method_name": "Execute",
+            "position": [base_x + 270.0, stage_y + 80.0],
+        },
+        {
+            "name": foot_add,
+            "struct_path": "/Script/RigVM.RigVMFunction_MathDoubleAdd",
+            "method_name": "Execute",
+            "position": [base_x + 430.0, stage_y + 80.0],
+        },
+        {
+            "name": foot_neg,
+            "struct_path": "/Script/RigVM.RigVMFunction_MathDoubleNegate",
+            "method_name": "Execute",
+            "position": [base_x + 590.0, stage_y + 80.0],
+        },
+    ]
+
+    _add_pin_default(
+        set_defaults,
+        pin_path=f"{foot_get}.Control",
+        pin_path_candidates=[f"{foot_get}.ControlFloat", f"{foot_get}.Name"],
+        value=source_control,
+    )
+    _add_pin_default(
+        set_defaults,
+        pin_path=f"{foot_get}.Name",
+        pin_path_candidates=[f"{foot_get}.Channel", f"{foot_get}.FloatName"],
+        value=input_channel,
+    )
+    _add_pin_default(set_defaults, pin_path=f"{foot_mul}.B", value=str(factor))
+    _add_pin_default(set_defaults, pin_path=f"{foot_add}.A", value="1.0")
+    _add_pin_default(set_defaults, pin_path=f"{foot_neg}.Value", value="0.0")
+
+    axis_pin = "X"
+    if target_axis in {"Y", "Z"}:
+        axis_pin = target_axis
+    _add_pin_default(set_defaults, pin_path=f"{set_node}.Value.{axis_pin}", value="0.0")
+
+    links = [
+        {"source": f"{foot_get}.Float", "target": f"{foot_mul}.A", "stage": stage_name},
+        {"source": f"{foot_mul}.Result", "target": f"{foot_add}.B", "stage": stage_name},
+        {"source": f"{foot_add}.Result", "target": f"{foot_neg}.Value", "stage": stage_name},
+        {"source": f"{foot_neg}.Result", "target": f"{set_node}.Value.{axis_pin}", "stage": stage_name},
+    ]
+    return {"nodes": nodes, "links": links}
+
+
 def _annotate_point_target_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     metadata = module.get("metadata", {}) or {}
     aim_axis = str(metadata.get("aim_axis") or "+x")
@@ -1550,10 +1667,7 @@ def _build_module_math_model(module: Dict[str, Any]) -> Dict[str, Any]:
                 }
             )
             implemented.append("foot_roll_hierarchy_and_stage_links")
-            approximations.append(
-                "Foot roll math operators (inverse toe roll, per-axis compensation) are approximated by hierarchy "
-                "composition and staged links."
-            )
+            implemented.append("foot_roll_inverse_toe_and_bank_compensation_operators")
         if module_class == "QuadLimb":
             equations.append(
                 {
@@ -1913,6 +2027,20 @@ def _make_stage_nodes_for_binding(
         else:
             extra_links.append({"source": f"{hand_neg}.Result", "target": f"{set_node}.Value.Y", "stage": stage_name})
 
+    foot_roll_ops = _limb_foot_roll_operator_nodes(
+        stage_name=stage_name,
+        graph_module_name=graph_module_name,
+        stage_tag=stage_tag,
+        index=index,
+        binding=binding,
+        base_x=base_x,
+        stage_y=stage_y,
+        set_node=set_node,
+        set_defaults=set_defaults,
+    )
+    extra_nodes.extend(foot_roll_ops["nodes"])
+    extra_links.extend(foot_roll_ops["links"])
+
     links: List[Dict[str, Any]] = []
     if transform_source_pin:
         links.append({"source": transform_source_pin, "target": f"{set_node}.Value", "stage": stage_name})
@@ -1979,6 +2107,7 @@ def build_module_behavior_graph_plan(module: Dict[str, Any]) -> Dict[str, Any]:
         bindings = _hand_operator_bindings(module, bindings)
     if module_class in {"Limb", "QuadLimb"}:
         bindings = _limb_ik_fk_bindings(module, bindings)
+        bindings = _limb_foot_roll_operator_bindings(module, bindings)
     nodes: List[Dict[str, Any]] = []
     links: List[Dict[str, Any]] = []
     pin_defaults: List[Dict[str, str]] = []
