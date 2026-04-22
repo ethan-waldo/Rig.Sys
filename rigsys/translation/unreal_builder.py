@@ -21,6 +21,10 @@ def _safe_name(name: str) -> str:
     return name.replace(" ", "_")
 
 
+def _graph_safe_name(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_]", "_", _safe_name(name))
+
+
 def _vector_from_list(values: Iterable[float]):
     unreal = _load_unreal()
     x, y, z = [float(v) for v in values]
@@ -1166,6 +1170,261 @@ def augment_payload_with_generated_controls(translated_payload: Dict[str, Any]) 
     return payload
 
 
+def _control_to_proxy_bindings(module: Dict[str, Any]) -> List[Dict[str, str]]:
+    module_name = module.get("module_name", "")
+    bindings: List[Dict[str, str]] = []
+    for control in module.get("controls", []):
+        control_name = control.get("name")
+        driven_proxy = control.get("driven_proxy")
+        if not control_name or not driven_proxy:
+            continue
+        bindings.append(
+            {
+                "control_name": control_name,
+                "proxy_bone_name": f"{module_name}_{driven_proxy}_Proxy",
+            }
+        )
+    return bindings
+
+
+def build_module_behavior_graph_plan(module: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a RigVM graph node/link plan for one module.
+
+    The plan is consumed by Unreal-side graph application and can be unit-tested
+    outside Unreal.
+    """
+    module_name = module.get("module_name", "Module")
+    graph_module_name = _graph_safe_name(module_name)
+    bindings = _control_to_proxy_bindings(module)
+    nodes: List[Dict[str, Any]] = []
+    links: List[Dict[str, str]] = []
+    pin_defaults: List[Dict[str, str]] = []
+    exec_source_pin = "BeginExecution.ExecuteContext"
+
+    for index, binding in enumerate(bindings):
+        control_name = binding["control_name"]
+        proxy_bone_name = binding["proxy_bone_name"]
+        get_node = f"{graph_module_name}_GetCtrl_{index}"
+        set_node = f"{graph_module_name}_SetProxy_{index}"
+
+        nodes.append(
+            {
+                "name": get_node,
+                "struct_path": "/Script/ControlRig.RigUnit_GetControlTransform",
+                "method_name": "Execute",
+                "position": [200.0 + (index * 380.0), 200.0],
+            }
+        )
+        nodes.append(
+            {
+                "name": set_node,
+                "struct_path": "/Script/ControlRig.RigUnit_SetTransform",
+                "method_name": "Execute",
+                "position": [420.0 + (index * 380.0), 200.0],
+            }
+        )
+
+        pin_defaults.extend(
+            [
+                {"pin_path": f"{get_node}.Control", "value": str(control_name)},
+                {"pin_path": f"{get_node}.Space", "value": "GlobalSpace"},
+                {"pin_path": f"{set_node}.Item", "value": f'(Type=Bone,Name="{proxy_bone_name}")'},
+                {"pin_path": f"{set_node}.Space", "value": "GlobalSpace"},
+                {"pin_path": f"{set_node}.Weight", "value": "1.0"},
+                {"pin_path": f"{set_node}.bInitial", "value": "False"},
+            ]
+        )
+
+        links.extend(
+            [
+                {"source": f"{get_node}.Transform", "target": f"{set_node}.Value"},
+                {"source": exec_source_pin, "target": f"{set_node}.ExecuteContext"},
+            ]
+        )
+        exec_source_pin = f"{set_node}.ExecuteContext"
+
+    return {
+        "module_name": module_name,
+        "nodes": nodes,
+        "links": links,
+        "pin_defaults": pin_defaults,
+    }
+
+
+def build_behavior_graph_plan(translated_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Build aggregate RigVM graph plan from translated payload."""
+    module_plans = [build_module_behavior_graph_plan(module) for module in translated_payload.get("modules", [])]
+    nodes: List[Dict[str, Any]] = []
+    links: List[Dict[str, str]] = []
+    pin_defaults: List[Dict[str, str]] = []
+    for module_plan in module_plans:
+        nodes.extend(module_plan["nodes"])
+        links.extend(module_plan["links"])
+        pin_defaults.extend(module_plan["pin_defaults"])
+    return {
+        "modules": module_plans,
+        "nodes": nodes,
+        "links": links,
+        "pin_defaults": pin_defaults,
+    }
+
+
+def _get_rigvm_controller(control_rig):
+    model = None
+    get_model = getattr(control_rig, "get_model", None)
+    if callable(get_model):
+        try:
+            model = get_model()
+        except Exception:
+            model = None
+
+    get_or_create_controller = getattr(control_rig, "get_or_create_controller", None)
+    if callable(get_or_create_controller):
+        for args in ((model,), tuple()):
+            try:
+                controller = get_or_create_controller(*args)
+                if controller is not None:
+                    return controller
+            except Exception:
+                continue
+
+    get_controller = getattr(control_rig, "get_controller", None)
+    if callable(get_controller):
+        for args in ((model,), tuple()):
+            try:
+                controller = get_controller(*args)
+                if controller is not None:
+                    return controller
+            except Exception:
+                continue
+
+    get_controller_by_name = getattr(control_rig, "get_controller_by_name", None)
+    if callable(get_controller_by_name):
+        for graph_name in ("Rig Graph", "RigVMModel", "Model"):
+            try:
+                controller = get_controller_by_name(graph_name)
+                if controller is not None:
+                    return controller
+            except Exception:
+                continue
+
+    controllers_map = getattr(control_rig, "controllers", None)
+    if controllers_map:
+        try:
+            for _, controller in controllers_map.items():
+                if controller is not None:
+                    return controller
+        except Exception:
+            pass
+
+    raise RuntimeError("Unable to acquire RigVMController from ControlRigBlueprint")
+
+
+def _controller_add_unit_node(controller, node_spec: Dict[str, Any]) -> Any:
+    unreal = _load_unreal()
+    add_unit = getattr(controller, "add_unit_node_from_struct_path", None)
+    if not callable(add_unit):
+        raise RuntimeError("RigVMController.add_unit_node_from_struct_path is unavailable")
+
+    position = unreal.Vector2D(float(node_spec["position"][0]), float(node_spec["position"][1]))
+    struct_path = node_spec["struct_path"]
+    method_name = node_spec.get("method_name", "Execute")
+    node_name = node_spec["name"]
+
+    call_variants = [
+        (struct_path, method_name, position, node_name, True, False),
+        (struct_path, method_name, position, node_name, True),
+        (struct_path, method_name, position, node_name),
+        (struct_path, position, node_name, True, False),
+        (struct_path, position, node_name, True),
+        (struct_path, position, node_name),
+    ]
+    last_error: Optional[Exception] = None
+    for args in call_variants:
+        try:
+            return add_unit(*args)
+        except Exception as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    return None
+
+
+def _controller_set_pin_default(controller, pin_path: str, value: str) -> bool:
+    setter = getattr(controller, "set_pin_default_value", None)
+    if not callable(setter):
+        return False
+    call_variants = [
+        (pin_path, value, True, True, False),
+        (pin_path, value, True, True),
+        (pin_path, value, True),
+        (pin_path, value),
+    ]
+    for args in call_variants:
+        try:
+            setter(*args)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _controller_add_link(controller, source: str, target: str) -> bool:
+    add_link = getattr(controller, "add_link", None)
+    if not callable(add_link):
+        return False
+    call_variants = [
+        (source, target, True, False),
+        (source, target, True),
+        (source, target),
+    ]
+    for args in call_variants:
+        try:
+            result = add_link(*args)
+            return bool(result) if result is not None else True
+        except Exception:
+            continue
+    return False
+
+
+def apply_behavior_graph_to_control_rig(control_rig, translated_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Emit RigVM nodes and links for control-to-proxy behavior."""
+    plan = build_behavior_graph_plan(translated_payload)
+    if not plan["nodes"]:
+        return {"nodes_added": 0, "links_added": 0, "defaults_set": 0, "warnings": []}
+
+    controller = _get_rigvm_controller(control_rig)
+    warnings: List[str] = []
+    nodes_added = 0
+    for node_spec in plan["nodes"]:
+        try:
+            _controller_add_unit_node(controller, node_spec)
+            nodes_added += 1
+        except Exception as exc:
+            warnings.append(f"Failed to add node {node_spec['name']}: {exc}")
+
+    defaults_set = 0
+    for pin_default in plan["pin_defaults"]:
+        if _controller_set_pin_default(controller, pin_default["pin_path"], pin_default["value"]):
+            defaults_set += 1
+        else:
+            warnings.append(f"Failed to set default {pin_default['pin_path']}")
+
+    links_added = 0
+    for link in plan["links"]:
+        if _controller_add_link(controller, link["source"], link["target"]):
+            links_added += 1
+        else:
+            warnings.append(f"Failed to add link {link['source']} -> {link['target']}")
+
+    return {
+        "nodes_added": nodes_added,
+        "links_added": links_added,
+        "defaults_set": defaults_set,
+        "warnings": warnings,
+    }
+
+
 def import_skeletal_mesh(fbx_file: str, destination_path: str, asset_name: Optional[str] = None) -> str:
     """Import a skeletal mesh FBX into Unreal content browser."""
     unreal = _load_unreal()
@@ -1343,6 +1602,8 @@ def build_control_rig_from_payload(
                                 declared_parent = existing_name
                                 break
             _add_control_if_missing(hierarchy=hierarchy, parent_control=declared_parent, control=control)
+
+    apply_behavior_graph_to_control_rig(control_rig=control_rig, translated_payload=materialized_payload)
 
     control_rig.request_auto_vm_recompilation()
     unreal.EditorAssetLibrary.save_asset(control_rig_path, only_if_is_dirty=False)

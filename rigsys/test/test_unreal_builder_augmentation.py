@@ -4,6 +4,7 @@ import unittest
 
 from rigsys.translation.unreal_builder import (
     augment_payload_with_generated_controls,
+    build_behavior_graph_plan,
     generate_augmented_controls,
 )
 
@@ -401,4 +402,79 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         self.assertIn("M_Target_Target_0_CTRL", control_names)
         self.assertIn("M_Target_Target_1_CTRL", control_names)
         self.assertEqual(len(controls), 3)
+
+    def test_graph_plan_generates_link_ops_for_limb_and_point_target(self):
+        payload = {
+            "rig_name": "GraphRig",
+            "modules": [
+                {
+                    "module_name": "L_Leg",
+                    "module_class": "Limb",
+                    "proxies": [
+                        {"name": "Root", "parent": None, "position": [0, 10, 0], "rotation": [0, 0, 0]},
+                        {"name": "Start", "parent": "Root", "position": [0, 10, 0], "rotation": [0, 0, 0]},
+                        {"name": "Mid", "parent": "Start", "position": [0, 5, 0], "rotation": [0, 0, 0]},
+                        {"name": "End", "parent": "Mid", "position": [0, 0, 0], "rotation": [0, 0, 0]},
+                        {"name": "Global", "parent": "End", "position": [0, 0, 0], "rotation": [0, 0, 0]},
+                    ],
+                    "controls": [
+                        {
+                            "name": "L_Leg_Start_CTRL",
+                            "role": "limb_fk",
+                            "shape": "circle",
+                            "scale": [1, 1, 1],
+                            "position": [0, 10, 0],
+                            "rotation": [0, 0, 0],
+                            "driven_proxy": "Start",
+                            "parent_proxy": "Root",
+                        },
+                        {
+                            "name": "L_Leg_IK_CTRL",
+                            "role": "ik_effector",
+                            "shape": "circle",
+                            "scale": [1, 1, 1],
+                            "position": [0, 0, 0],
+                            "rotation": [0, 0, 0],
+                            "driven_proxy": "End",
+                            "parent_proxy": "Mid",
+                        },
+                    ],
+                    "module_settings": {
+                        "name_set": {"Root": "Root", "Start": "Start", "Mid": "Mid", "End": "End"},
+                        "foot": True,
+                    },
+                },
+                {
+                    "module_name": "M_Target",
+                    "module_class": "PointTarget",
+                    "proxies": [{"name": "Point", "parent": None, "position": [0, 0, 0], "rotation": [0, 0, 0]}],
+                    "controls": [
+                        {
+                            "name": "M_Target_Point_CTRL",
+                            "role": "point_target",
+                            "shape": "sphere",
+                            "scale": [1, 1, 1],
+                            "position": [0, 0, 0],
+                            "rotation": [0, 0, 0],
+                            "driven_proxy": "Point",
+                            "parent_proxy": None,
+                        }
+                    ],
+                    "module_settings": {
+                        "targets": ["A", "B"],
+                        "targets_influence": [0.7, 0.3],
+                        "constrain_type": "point",
+                        "maintain_offset": True,
+                    },
+                },
+            ],
+        }
+
+        plan = build_behavior_graph_plan(payload)
+
+        self.assertGreater(len(plan.get("nodes", [])), 0)
+        self.assertGreater(len(plan.get("links", [])), 0)
+        self.assertGreater(len(plan.get("values", [])), 0)
+        self.assertTrue(any("SetTransform" in node["struct_path"] for node in plan["nodes"]))
+        self.assertTrue(any("GetControlTransform" in node["struct_path"] for node in plan["nodes"]))
 
