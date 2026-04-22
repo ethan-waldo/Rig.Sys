@@ -237,6 +237,57 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         self.assertIn("L_QuadLeg_LowerAutoRoll_4_CTRL", generated_names)
         self.assertIn("L_QuadLeg_AutoRollSettings_CTRL", generated_names)
 
+    def test_fksegment_generates_ik_rail_controls(self):
+        module = {
+            "module_name": "M_Tail",
+            "module_class": "FKSegment",
+            "proxies": [
+                {"name": "Start", "parent": None, "position": [0, 0, 0], "rotation": [0, 0, 0]},
+                {"name": "1", "parent": "Start", "position": [0, 3, 0], "rotation": [0, 0, 0]},
+                {"name": "2", "parent": "1", "position": [0, 6, 0], "rotation": [0, 0, 0]},
+                {"name": "End", "parent": "2", "position": [0, 9, 0], "rotation": [0, 0, 0]},
+                {"name": "UpVector", "parent": "Start", "position": [0, 0, -3], "rotation": [0, 0, 0]},
+            ],
+            "controls": [],
+            "module_settings": {
+                "ik_rail": True,
+                "ctrl_scale": [1, 1, 1],
+            },
+        }
+        generated = generate_augmented_controls(module)
+        generated_names = {control["name"] for control in generated}
+
+        self.assertIn("M_Tail_IKRail_0_CTRL", generated_names)
+        self.assertIn("M_Tail_IKRail_3_CTRL", generated_names)
+
+    def test_ribbon_bind_ik_generates_bind_and_reverse_controls(self):
+        module = {
+            "module_name": "M_RibbonSpine",
+            "module_class": "RibbonBindIK",
+            "proxies": [
+                {"name": "Start", "parent": None, "position": [0, 0, 0], "rotation": [0, 0, 0]},
+                {"name": "1", "parent": "Start", "position": [0, 2, 0], "rotation": [0, 0, 0]},
+                {"name": "End", "parent": "1", "position": [0, 4, 0], "rotation": [0, 0, 0]},
+                {"name": "UpVector", "parent": "Start", "position": [0, 0, -2], "rotation": [0, 0, 0]},
+            ],
+            "controls": [],
+            "module_settings": {
+                "spans": 3,
+                "meta": True,
+                "reverse": True,
+                "number_of_joints": 5,
+                "ctrl_scale": [1, 1, 1],
+            },
+        }
+        generated = generate_augmented_controls(module)
+        generated_names = {control["name"] for control in generated}
+
+        self.assertIn("M_RibbonSpine_Meta_0_CTRL", generated_names)
+        self.assertIn("M_RibbonSpine_Bind_0_CTRL", generated_names)
+        self.assertIn("M_RibbonSpine_Bind_4_CTRL", generated_names)
+        self.assertIn("M_RibbonSpine_End_RibbonRev_CTRL", generated_names)
+        self.assertIn("M_RibbonSpine_Start_RibbonRev_CTRL", generated_names)
+
     def test_lips_generates_segment_and_jaw_controls(self):
         module = {
             "module_name": "M_Lips",

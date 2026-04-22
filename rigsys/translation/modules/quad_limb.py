@@ -14,10 +14,6 @@ class QuadLimbTranslator(LimbTranslator):
 
     def build_module_settings(self, module: Any) -> Dict[str, Any]:
         settings = super().build_module_settings(module)
-        if getattr(module, "foot", False):
-            self._last_warnings.append(
-                "QuadLimb foot setup is translated as settings metadata only; Unreal auto-foot roll graph is not generated."
-            )
         settings.update(
             {
                 "curved_calf": bool(getattr(module, "curvedCalf", False)),

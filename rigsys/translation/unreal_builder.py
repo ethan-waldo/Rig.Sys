@@ -95,6 +95,59 @@ def _build_proxy_map(module: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     return result
 
 
+def _ordered_proxy_chain(
+    module: Dict[str, Any],
+    *,
+    exclude_names: Optional[Iterable[str]] = None,
+) -> List[Dict[str, Any]]:
+    proxies = module.get("proxies", [])
+    if not proxies:
+        return []
+
+    excluded = set(exclude_names or [])
+    by_name: Dict[str, Dict[str, Any]] = {}
+    order_index: Dict[str, int] = {}
+    children: Dict[Optional[str], List[str]] = {}
+    for idx, proxy in enumerate(proxies):
+        name = proxy.get("name")
+        if not name:
+            continue
+        by_name[name] = proxy
+        order_index[name] = idx
+        children.setdefault(proxy.get("parent"), []).append(name)
+
+    if not by_name:
+        return []
+
+    for names in children.values():
+        names.sort(key=lambda candidate: order_index.get(candidate, 0))
+
+    roots = [name for name, proxy in by_name.items() if proxy.get("parent") not in by_name]
+    if "Start" in by_name:
+        current = "Start"
+    elif "Root" in by_name:
+        current = "Root"
+    elif roots:
+        current = roots[0]
+    else:
+        current = next(iter(by_name.keys()))
+
+    chain: List[Dict[str, Any]] = []
+    visited = set()
+    while current and current not in visited:
+        visited.add(current)
+        if current not in excluded:
+            chain.append(by_name[current])
+        child_names = [name for name in children.get(current, []) if name not in visited]
+        if not child_names:
+            break
+
+        non_upvector = [name for name in child_names if name.lower() != "upvector"]
+        current = non_upvector[0] if non_upvector else child_names[0]
+
+    return chain
+
+
 def _make_control(
     *,
     name: str,
@@ -513,6 +566,41 @@ def _add_segment_driver_controls(module: Dict[str, Any], proxy_map: Dict[str, Di
     return output
 
 
+def _add_fk_ik_rail_controls(module: Dict[str, Any]) -> List[Dict[str, Any]]:
+    settings = module.get("module_settings", {})
+    if not settings.get("ik_rail"):
+        return []
+
+    chain = _ordered_proxy_chain(module, exclude_names={"UpVector"})
+    if len(chain) < 2:
+        return []
+
+    base_scale = _vec(settings.get("ctrl_scale"), [1.0, 1.0, 1.0])
+    output = []
+    parent = None
+    for idx, proxy in enumerate(chain):
+        proxy_name = proxy.get("name")
+        if not proxy_name:
+            continue
+        ctrl_name = f"{module['module_name']}_IKRail_{idx}_CTRL"
+        output.append(
+            _make_control(
+                name=ctrl_name,
+                role="ik_rail_driver",
+                shape=_module_shape(settings, "Circle"),
+                scale=_vec_scale(base_scale, 0.65),
+                position=proxy.get("position", [0.0, 0.0, 0.0]),
+                rotation=proxy.get("rotation", [0.0, 0.0, 0.0]),
+                parent_control=parent,
+                driven_proxy=proxy_name,
+                parent_proxy=proxy.get("parent"),
+                metadata={"rail_index": idx},
+            )
+        )
+        parent = ctrl_name
+    return output
+
+
 def _add_ribbon_meta_controls(module: Dict[str, Any], proxy_map: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     settings = module.get("module_settings", {})
     if not settings.get("meta"):
@@ -542,6 +630,83 @@ def _add_ribbon_meta_controls(module: Dict[str, Any], proxy_map: Dict[str, Dict[
                 parent_control=None if idx == 0 else f"{module['module_name']}_Meta_{idx - 1}_CTRL",
             )
         )
+    return output
+
+
+def _add_ribbon_bind_controls(module: Dict[str, Any], proxy_map: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    settings = module.get("module_settings", {})
+    count = int(settings.get("number_of_joints") or 0)
+    if count <= 0:
+        return []
+
+    start = proxy_map.get("Start")
+    end = proxy_map.get("End")
+    if not start or not end:
+        chain = _ordered_proxy_chain(module, exclude_names={"UpVector"})
+        if len(chain) >= 2:
+            start = chain[0]
+            end = chain[-1]
+    if not start or not end:
+        return []
+
+    start_pos = _vec(start.get("position"))
+    end_pos = _vec(end.get("position"))
+    start_rot = _vec(start.get("rotation"))
+    end_rot = _vec(end.get("rotation"))
+    base_scale = _vec(settings.get("ctrl_scale"), [1.0, 1.0, 1.0])
+
+    output = []
+    parent = None
+    for idx in range(count):
+        alpha = 0.0 if count == 1 else float(idx) / float(count - 1)
+        name = f"{module['module_name']}_Bind_{idx}_CTRL"
+        output.append(
+            _make_control(
+                name=name,
+                role="ribbon_bind_driver",
+                shape=_module_shape(settings, "Sphere"),
+                scale=_vec_scale(base_scale, 0.6),
+                position=_vec_lerp(start_pos, end_pos, alpha),
+                rotation=_vec_lerp(start_rot, end_rot, alpha),
+                parent_control=parent,
+                metadata={"bind_index": idx, "count": count},
+            )
+        )
+        parent = name
+    return output
+
+
+def _add_ribbon_reverse_controls(module: Dict[str, Any]) -> List[Dict[str, Any]]:
+    settings = module.get("module_settings", {})
+    if not settings.get("reverse"):
+        return []
+
+    chain = _ordered_proxy_chain(module, exclude_names={"UpVector"})
+    if len(chain) < 2:
+        return []
+
+    base_scale = _vec(settings.get("ctrl_scale"), [1.0, 1.0, 1.0])
+    output = []
+    parent = None
+    for proxy in reversed(chain):
+        proxy_name = proxy.get("name")
+        if not proxy_name:
+            continue
+        name = f"{module['module_name']}_{proxy_name}_RibbonRev_CTRL"
+        output.append(
+            _make_control(
+                name=name,
+                role="ribbon_reverse",
+                shape=_module_shape(settings, "Square"),
+                scale=_vec_scale(base_scale, 0.55),
+                position=proxy.get("position", [0.0, 0.0, 0.0]),
+                rotation=proxy.get("rotation", [0.0, 0.0, 0.0]),
+                parent_control=parent,
+                driven_proxy=proxy_name,
+                parent_proxy=proxy.get("parent"),
+            )
+        )
+        parent = name
     return output
 
 
@@ -952,6 +1117,8 @@ def generate_augmented_controls(module: Dict[str, Any]) -> List[Dict[str, Any]]:
         add_many(_add_fk_reverse(module, existing_controls))
     if module_class in {"FK", "FKSegment"}:
         add_many(_add_segment_driver_controls(module, proxy_map))
+    if module_class == "FKSegment":
+        add_many(_add_fk_ik_rail_controls(module))
     if module_class in {"Limb", "QuadLimb"}:
         pv_ctrl = _infer_limb_pv(module, proxy_map)
         if pv_ctrl:
@@ -962,7 +1129,9 @@ def generate_augmented_controls(module: Dict[str, Any]) -> List[Dict[str, Any]]:
     if module_class == "QuadLimb":
         add_many(_add_quad_limb_auto_roll_controls(module, proxy_map))
     if module_class == "RibbonBindIK":
+        add_many(_add_ribbon_bind_controls(module, proxy_map))
         add_many(_add_ribbon_meta_controls(module, proxy_map))
+        add_many(_add_ribbon_reverse_controls(module))
     if module_class == "PointTarget":
         add_many(_add_point_target_controls(module, existing_controls))
     if module_class == "Hand":

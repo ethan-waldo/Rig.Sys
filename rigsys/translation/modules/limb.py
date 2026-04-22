@@ -16,7 +16,7 @@ class LimbTranslator(GenericTranslator):
     def build_controls(self, module: Any, proxy_lookup: Dict[str, Any]) -> List[ControlDefinition]:
         controls: List[ControlDefinition] = []
         root_proxy = proxy_lookup.get(getattr(module, "nameSet", {}).get("Root", "Root"))
-        if root_proxy is not None:
+        if bool(getattr(module, "clavicle", False)) and root_proxy is not None:
             controls.append(
                 ControlDefinition(
                     name=f"{module.getFullName()}_Clavicle_CTRL",
@@ -45,10 +45,6 @@ class LimbTranslator(GenericTranslator):
 
     def build_module_settings(self, module: Any) -> Dict[str, Any]:
         settings = super().build_module_settings(module)
-        if getattr(module, "foot", False):
-            self._last_warnings.append(
-                "Limb foot setup is translated as settings metadata only; Unreal auto-foot roll graph is not generated."
-            )
         settings.update(
             {
                 "number_of_joints": getattr(module, "numberOfJoints", None),
