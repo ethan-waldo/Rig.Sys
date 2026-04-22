@@ -1029,18 +1029,22 @@ def _populate_hierarchy(control_rig_bp, manifest):
         if hasattr(unreal, "RigBoneType"):
             bone_type = getattr(unreal.RigBoneType, "IMPORTED", None) or getattr(unreal.RigBoneType, "USER", None)
         if hasattr(hierarchy, "add_bone"):
-            _try_call(
-                hierarchy.add_bone,
-                [
-                    ((joint["name"], parent_key, transform, True, bone_type, False), {}),
-                    ((joint["name"], parent_key, transform, True, bone_type), {}),
-                    ((joint["name"], parent_key, transform, True), {}),
-                    ((joint["name"], parent_key, transform), {"setup_undo": False}),
-                    ((joint["name"], parent, transform), {"setup_undo": False}),
-                    ((joint["name"], parent, transform, False), {}),
-                    ((joint["name"], parent, transform), {}),
-                ],
-            )
+            if bone_type is not None:
+                _try_call(
+                    hierarchy.add_bone,
+                    [
+                        ((joint["name"], parent_key, transform, True, bone_type, False, False), {}),
+                        ((joint["name"], parent_key, transform, True, bone_type, False), {}),
+                    ],
+                )
+            else:
+                _try_call(
+                    hierarchy.add_bone,
+                    [
+                        ((joint["name"], parent_key, transform, True, False, False), {}),
+                        ((joint["name"], parent_key, transform, True, False), {}),
+                    ],
+                )
 
     for control in manifest.get("controls", []):
         transform = _to_transform(control["translation"], control["rotation"], control["scale"])
@@ -1054,40 +1058,21 @@ def _populate_hierarchy(control_rig_bp, manifest):
             if hasattr(unreal, "RigControlType"):
                 control_settings.control_type = unreal.RigControlType.EULER_TRANSFORM
 
-            add_control_candidates = []
             if control_value is not None:
-                add_control_candidates.extend(
+                control_added = _try_call(
+                    hierarchy.add_control,
                     [
+                        ((control["name"], parent_key, control_settings, control_value, False, False), {}),
                         ((control["name"], parent_key, control_settings, control_value, False), {}),
-                        ((control["name"], parent_key, control_settings, control_value), {}),
-                        ((control["name"], parent, control_settings, control_value, False), {}),
-                        ((control["name"], parent, control_settings, control_value), {}),
-                    ]
+                    ],
                 )
-            add_control_candidates.extend(
-                [
-                    ((control["name"], parent, control_settings, transform), {"setup_undo": False}),
-                    ((control["name"], parent, control_settings, transform, transform), {"setup_undo": False}),
-                    ((control["name"], parent, control_settings, transform, transform, False), {}),
-                    ((control["name"], parent, control_settings, transform, transform, False, False), {}),
-                ]
-            )
-
-            control_added = _try_call(
-                hierarchy.add_control,
-                add_control_candidates,
-            )
 
         if not control_added and hasattr(hierarchy, "add_null"):
             _try_call(
                 hierarchy.add_null,
                 [
+                    ((control["name"], parent_key, transform, True, False, False), {}),
                     ((control["name"], parent_key, transform, True, False), {}),
-                    ((control["name"], parent_key, transform, True), {}),
-                    ((control["name"], parent_key, transform), {"setup_undo": False}),
-                    ((control["name"], parent, transform), {"setup_undo": False}),
-                    ((control["name"], parent, transform, False), {}),
-                    ((control["name"], parent, transform), {}),
                 ],
             )
 
@@ -2425,10 +2410,10 @@ def _try_add_unit_node(controller, struct_paths, position, node_name):
         if struct_path in missing_struct_paths:
             continue
         candidates = [
+            ((struct_path, "Execute", position, node_name, False, False), {}),
+            ((struct_path, "Execute", position, node_name, False), {}),
             ((struct_path, "Execute", position, node_name), {}),
             ((struct_path, "Execute", position), {}),
-            ((struct_path, position, node_name), {}),
-            ((struct_path, position), {}),
         ]
         for args, kwargs in candidates:
             try:
