@@ -27,7 +27,7 @@ class _FakeProxy:
         self.plug = plug
 
 
-class _FakeRootModule:
+class Root:
     def __init__(self):
         self.side = "M"
         self.label = "Root"
@@ -58,7 +58,7 @@ class _FakeRootModule:
         return "M_Root"
 
 
-class _FakeTestMotionModule:
+class TestMotionModule:
     def __init__(self):
         self.side = "L"
         self.label = "Arm"
@@ -93,8 +93,8 @@ class _FakeRig:
 
     def __init__(self):
         self.motionModules = {
-            "L_Arm": _FakeTestMotionModule(),
-            "M_Root": _FakeRootModule(),
+            "L_Arm": TestMotionModule(),
+            "M_Root": Root(),
         }
 
 
