@@ -524,8 +524,19 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         self.assertGreater(plan["stages"]["backward"]["links"], 0)
         self.assertGreater(plan["stages"]["construction"]["links"], 0)
         self.assertTrue(any("source_candidates" in link for link in plan["links"]))
+        self.assertTrue(any(link.get("stage") == "forward" for link in plan["links"]))
+        self.assertTrue(any(link.get("stage") == "backward" for link in plan["links"]))
+        self.assertTrue(any(link.get("stage") == "construction" for link in plan["links"]))
+        self.assertTrue(
+            any(
+                link.get("stage") == "forward" and ".Weight" in str(link.get("target", ""))
+                for link in plan["links"]
+            )
+        )
         self.assertGreater(len(plan.get("math_models", [])), 0)
         self.assertTrue(any(model.get("module_class") == "Limb" for model in plan["math_models"]))
+        limb_model = next(model for model in plan["math_models"] if model.get("module_class") == "Limb")
+        self.assertTrue(any(eq.get("id") == "ik_fk_rotation_blend" for eq in limb_model.get("equations", [])))
         point_model = next(model for model in plan["math_models"] if model.get("module_class") == "PointTarget")
         self.assertEqual(point_model.get("implementation_status"), "approximate")
         self.assertTrue(any("maintain_offset" in gap for gap in point_model.get("approximation_gaps", [])))

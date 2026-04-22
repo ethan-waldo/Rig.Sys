@@ -1206,6 +1206,7 @@ def _control_to_proxy_bindings(module: Dict[str, Any]) -> List[Dict[str, Any]]:
         bindings.append(
             {
                 "source_control": control_name,
+                "source_role": control.get("role"),
                 "target_item_type": "Bone",
                 "target_item_name": f"{module_name}_{driven_proxy}_Proxy",
                 "weight": 1.0,
@@ -1268,6 +1269,37 @@ def _point_target_behavior_bindings(module: Dict[str, Any], default_target_bone_
     return output
 
 
+def _limb_ik_fk_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    settings = module.get("module_settings", {})
+    controls = module.get("controls", [])
+    ik_control = next((control for control in controls if control.get("role") == "ik_effector"), None)
+    if not ik_control:
+        return bindings
+
+    switch_pin = f"{ik_control.get('name')}.IK_FK_Switch"
+    output: List[Dict[str, Any]] = []
+    has_ik = bool(settings.get("ik_ctrl_to_floor")) or bool(settings.get("foot"))
+    for binding in bindings:
+        role = str(binding.get("source_role", ""))
+        if role == "limb_fk":
+            data = dict(binding)
+            data["weight_pin_path"] = switch_pin
+            data["math_mode"] = "ik_fk_fk_branch"
+            output.append(data)
+            continue
+
+        if role in {"ik_effector", "pole_vector", "ik_floor_anchor", "foot_roll"} or (role.startswith("quad_") and has_ik):
+            data = dict(binding)
+            data["weight_pin_path"] = switch_pin
+            data["weight_invert"] = True
+            data["math_mode"] = "ik_fk_ik_branch"
+            output.append(data)
+            continue
+
+        output.append(binding)
+    return output
+
+
 def _build_module_math_model(module: Dict[str, Any]) -> Dict[str, Any]:
     module_name = module.get("module_name", "Module")
     module_class = module.get("module_class", "")
@@ -1292,10 +1324,6 @@ def _build_module_math_model(module: Dict[str, Any]) -> Dict[str, Any]:
             ]
         )
         implemented.append("staged_forward_backward_construction_transform_mapping")
-        approximations.append(
-            "IK_FK_Switch channel-level blend is approximated via staged transform propagation; "
-            "dedicated blend nodes are not yet emitted."
-        )
         if bool(settings.get("foot", False)):
             equations.append(
                 {
@@ -1420,6 +1448,21 @@ def _execution_stage_specs() -> Dict[str, Dict[str, Any]]:
     }
 
 
+def _add_pin_default(
+    pin_defaults: List[Dict[str, Any]],
+    *,
+    pin_path: Optional[str] = None,
+    pin_path_candidates: Optional[List[str]] = None,
+    value: Any,
+) -> None:
+    entry: Dict[str, Any] = {"value": str(value)}
+    if pin_path is not None:
+        entry["pin_path"] = pin_path
+    if pin_path_candidates:
+        entry["pin_path_candidates"] = list(pin_path_candidates)
+    pin_defaults.append(entry)
+
+
 def _make_stage_nodes_for_binding(
     *,
     stage_name: str,
@@ -1443,32 +1486,79 @@ def _make_stage_nodes_for_binding(
         "backward": 700.0,
     }.get(stage_name, 200.0)
 
+    weight_pin_path = binding.get("weight_pin_path")
+    weight_pin_path_candidates = list(binding.get("weight_pin_path_candidates") or [])
+    invert_weight = bool(binding.get("weight_invert", False))
     if stage_name == "forward":
         get_struct = "/Script/ControlRig.RigUnit_GetControlTransform"
-        get_defaults = [
-            {"pin_path": f"{get_node}.Control", "value": str(source_control)},
-            {"pin_path": f"{get_node}.Space", "value": source_space},
-        ]
+        get_defaults: List[Dict[str, Any]] = []
+        _add_pin_default(get_defaults, pin_path=f"{get_node}.Control", value=str(source_control))
+        _add_pin_default(get_defaults, pin_path=f"{get_node}.Space", value=source_space)
         set_item = f'(Type={target_item_type},Name="{target_item_name}")'
         set_b_initial = "False"
         set_weight = str(weight)
     else:
         get_struct = "/Script/ControlRig.RigUnit_GetTransform"
-        get_defaults = [
-            {"pin_path": f"{get_node}.Item", "value": f'(Type={target_item_type},Name="{target_item_name}")'},
-            {"pin_path": f"{get_node}.Space", "value": target_space},
-            {"pin_path": f"{get_node}.bInitial", "value": "False"},
-        ]
+        get_defaults = []
+        _add_pin_default(
+            get_defaults,
+            pin_path=f"{get_node}.Item",
+            value=f'(Type={target_item_type},Name="{target_item_name}")',
+        )
+        _add_pin_default(get_defaults, pin_path=f"{get_node}.Space", value=target_space)
+        _add_pin_default(get_defaults, pin_path=f"{get_node}.bInitial", value="False")
         set_item = f'(Type=Control,Name="{source_control}")'
         set_b_initial = "True" if stage_name == "construction" else "False"
         set_weight = "1.0"
 
-    set_defaults = [
-        {"pin_path": f"{set_node}.Item", "value": set_item},
-        {"pin_path": f"{set_node}.Space", "value": source_space},
-        {"pin_path": f"{set_node}.Weight", "value": set_weight},
-        {"pin_path": f"{set_node}.bInitial", "value": set_b_initial},
-    ]
+    set_defaults: List[Dict[str, Any]] = []
+    _add_pin_default(set_defaults, pin_path=f"{set_node}.Item", value=set_item)
+    _add_pin_default(set_defaults, pin_path=f"{set_node}.Space", value=source_space)
+    _add_pin_default(set_defaults, pin_path=f"{set_node}.Weight", value=set_weight)
+    _add_pin_default(set_defaults, pin_path=f"{set_node}.bInitial", value=set_b_initial)
+
+    extra_nodes: List[Dict[str, Any]] = []
+    extra_links: List[Dict[str, Any]] = []
+    if stage_name == "forward" and (weight_pin_path or weight_pin_path_candidates):
+        weight_node = f"{graph_module_name}_{stage_tag}_Weight_{index}"
+        extra_nodes.append(
+            {
+                "name": weight_node,
+                "struct_path": "/Script/ControlRig.RigUnit_GetControlFloat",
+                "method_name": "Execute",
+                "position": [base_x + 110.0, stage_y - 120.0],
+            }
+        )
+        _add_pin_default(
+            set_defaults,
+            pin_path=f"{weight_node}.Control",
+            pin_path_candidates=[f"{weight_node}.ControlFloat", f"{weight_node}.Name"],
+            value=str(source_control),
+        )
+        channel_name = str(weight_pin_path.split(".")[-1]) if weight_pin_path else "IK_FK_Switch"
+        _add_pin_default(
+            set_defaults,
+            pin_path=f"{weight_node}.Name",
+            pin_path_candidates=[f"{weight_node}.Channel", f"{weight_node}.FloatName"],
+            value=channel_name,
+        )
+
+        if invert_weight:
+            invert_node = f"{graph_module_name}_{stage_tag}_OneMinus_{index}"
+            extra_nodes.append(
+                {
+                    "name": invert_node,
+                    "struct_path": "/Script/RigVM.RigVMFunction_MathDoubleSub",
+                    "method_name": "Execute",
+                    "position": [base_x + 290.0, stage_y - 120.0],
+                }
+            )
+            _add_pin_default(set_defaults, pin_path=f"{invert_node}.A", value="1.0")
+            extra_links.append({"source": f"{weight_node}.Float", "target": f"{invert_node}.B", "stage": stage_name})
+            extra_links.append({"source": f"{invert_node}.Result", "target": f"{set_node}.Weight", "stage": stage_name})
+        else:
+            extra_links.append({"source": f"{weight_node}.Float", "target": f"{set_node}.Weight", "stage": stage_name})
+
     return {
         "nodes": [
             {
@@ -1483,11 +1573,15 @@ def _make_stage_nodes_for_binding(
                 "method_name": "Execute",
                 "position": [base_x + 220.0, stage_y],
             },
-        ],
+        ]
+        + extra_nodes,
         "pin_defaults": get_defaults + set_defaults,
         "transform_link": {"source": f"{get_node}.Transform", "target": f"{set_node}.Value"},
         "set_exec_pin": f"{set_node}.ExecuteContext",
         "stage": stage_name,
+        "get_node_name": get_node,
+        "set_node_name": set_node,
+        "extra_links": extra_links,
     }
 
 
@@ -1518,6 +1612,8 @@ def build_module_behavior_graph_plan(module: Dict[str, Any]) -> Dict[str, Any]:
         ]
         point_bindings = _point_target_behavior_bindings(module, default_target_bone_name=default_target_bone_name)
         bindings.extend(point_bindings)
+    if module_class in {"Limb", "QuadLimb"}:
+        bindings = _limb_ik_fk_bindings(module, bindings)
     nodes: List[Dict[str, Any]] = []
     links: List[Dict[str, Any]] = []
     pin_defaults: List[Dict[str, str]] = []
@@ -1546,8 +1642,10 @@ def build_module_behavior_graph_plan(module: Dict[str, Any]) -> Dict[str, Any]:
             nodes.extend(stage_nodes["nodes"])
             pin_defaults.extend(stage_nodes["pin_defaults"])
             links.append(stage_nodes["transform_link"])
+            links.extend(stage_nodes.get("extra_links", []))
             stage_link_count += 1
             stage_node_count += len(stage_nodes["nodes"])
+            stage_link_count += len(stage_nodes.get("extra_links", []))
 
             exec_link_target = stage_nodes["set_exec_pin"]
             if stage_exec_pin is None:
@@ -1724,6 +1822,24 @@ def _controller_set_pin_default(controller, pin_path: str, value: str) -> bool:
     return False
 
 
+def _controller_set_pin_default_with_candidates(
+    controller,
+    *,
+    pin_path: Optional[str],
+    pin_path_candidates: Optional[List[str]],
+    value: str,
+) -> bool:
+    candidate_paths: List[str] = []
+    if pin_path:
+        candidate_paths.append(pin_path)
+    if pin_path_candidates:
+        candidate_paths.extend([candidate for candidate in pin_path_candidates if candidate not in candidate_paths])
+    for candidate_path in candidate_paths:
+        if _controller_set_pin_default(controller, candidate_path, value):
+            return True
+    return False
+
+
 def _controller_add_link(controller, source: str, target: str) -> bool:
     add_link = getattr(controller, "add_link", None)
     if not callable(add_link):
@@ -1760,10 +1876,21 @@ def apply_behavior_graph_to_control_rig(control_rig, translated_payload: Dict[st
 
     defaults_set = 0
     for pin_default in plan["pin_defaults"]:
-        if _controller_set_pin_default(controller, pin_default["pin_path"], pin_default["value"]):
+        pin_path = pin_default.get("pin_path")
+        pin_path_candidates = pin_default.get("pin_path_candidates")
+        value = str(pin_default.get("value", ""))
+        if _controller_set_pin_default_with_candidates(
+            controller,
+            pin_path=pin_path,
+            pin_path_candidates=pin_path_candidates,
+            value=value,
+        ):
             defaults_set += 1
         else:
-            warnings.append(f"Failed to set default {pin_default['pin_path']}")
+            if pin_path_candidates:
+                warnings.append(f"Failed to set default {pin_path or pin_path_candidates[0]} with candidates {pin_path_candidates}")
+            else:
+                warnings.append(f"Failed to set default {pin_path}")
 
     links_added = 0
     for link in plan["links"]:
