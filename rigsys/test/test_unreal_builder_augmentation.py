@@ -747,3 +747,71 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         self.assertEqual(limb_model.get("implementation_status"), "implemented")
         self.assertFalse(any("Foot roll math operators" in gap for gap in limb_model.get("approximation_gaps", [])))
 
+    def test_graph_plan_limb_ik_fk_visibility_reverse_nodes(self):
+        payload = {
+            "rig_name": "GraphRig",
+            "modules": [
+                {
+                    "module_name": "L_Leg",
+                    "module_class": "Limb",
+                    "proxies": [
+                        {"name": "Root", "parent": None, "position": [0, 10, 0], "rotation": [0, 0, 0]},
+                        {"name": "Start", "parent": "Root", "position": [0, 10, 0], "rotation": [0, 0, 0]},
+                        {"name": "Mid", "parent": "Start", "position": [0, 5, 0], "rotation": [0, 0, 0]},
+                        {"name": "End", "parent": "Mid", "position": [0, 0, 0], "rotation": [0, 0, 0]},
+                    ],
+                    "controls": [
+                        {
+                            "name": "L_Leg_Start_CTRL",
+                            "role": "limb_fk",
+                            "shape": "circle",
+                            "scale": [1, 1, 1],
+                            "position": [0, 10, 0],
+                            "rotation": [0, 0, 0],
+                            "driven_proxy": "Start",
+                            "parent_proxy": "Root",
+                        },
+                        {
+                            "name": "L_Leg_IK_CTRL",
+                            "role": "ik_effector",
+                            "shape": "circle",
+                            "scale": [1, 1, 1],
+                            "position": [0, 0, 0],
+                            "rotation": [0, 0, 0],
+                            "driven_proxy": "End",
+                            "parent_proxy": "Mid",
+                        },
+                    ],
+                    "module_settings": {
+                        "name_set": {"Root": "Root", "Start": "Start", "Mid": "Mid", "End": "End"},
+                        "foot": False,
+                    },
+                }
+            ],
+        }
+        materialized = augment_payload_with_generated_controls(payload)
+        plan = build_behavior_graph_plan(materialized)
+        limb_module = plan["modules"][0]
+        node_structs = [node["struct_path"] for node in limb_module["nodes"]]
+        node_names = [node["name"] for node in limb_module["nodes"]]
+
+        self.assertTrue(any("RigUnit_GetControlFloat" in path for path in node_structs))
+        self.assertTrue(any("MathDoubleSub" in path for path in node_structs))
+        self.assertTrue(any("_Vis_" in name or "_VisOneMinus_" in name for name in node_names))
+        self.assertTrue(
+            any(
+                str(link.get("target", "")).endswith(".Weight") and link.get("stage") == "forward"
+                for link in limb_module["links"]
+            )
+        )
+        self.assertTrue(
+            any(
+                pin_default.get("pin_path", "").endswith(".Name")
+                and pin_default.get("value") == "Visibility"
+                for pin_default in limb_module["pin_defaults"]
+            )
+        )
+
+        limb_model = next(model for model in plan["math_models"] if model.get("module_class") == "Limb")
+        self.assertTrue(any(eq.get("id") == "ik_fk_visibility_reverse" for eq in limb_model.get("equations", [])))
+
