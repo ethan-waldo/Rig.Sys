@@ -791,7 +791,6 @@ _RIGSYS_SOLVE_EVENTS_SEEDED = False
 ENABLE_UNRESOLVED_LINK_WARNINGS = False
 _PIN_EXISTS_CACHE = {}
 _MISSING_STRUCT_PATHS_CACHE = {}
-_SCRIPT_STRUCT_CACHE = {}
 
 
 def _log_warning(message):
@@ -1430,7 +1429,6 @@ def _apply_ik_fk_blend_instruction(controller, instruction, index, pin_map):
     unit_node = _try_add_unit_node(
         controller=controller,
         struct_paths=[
-            "/Script/RigVM.RigVMFunction_MathFloatLerp",
             "/Script/ControlRig.RigUnit_MathFloatLerp",
         ],
         position=node_position,
@@ -1474,7 +1472,6 @@ def _apply_visibility_instruction(controller, instruction, index, pin_map):
     not_node = _try_add_unit_node(
         controller=controller,
         struct_paths=[
-            "/Script/RigVM.RigVMFunction_MathBoolNot",
             "/Script/ControlRig.RigUnit_MathBoolNot",
         ],
         position=node_position,
@@ -1515,13 +1512,13 @@ def _apply_logic_constant_instruction(controller, instruction, index, pin_map):
         return False
 
     if isinstance(value, bool):
-        struct_paths = ["/Script/RigVM.RigVMFunction_MathBoolConst", "/Script/ControlRig.RigUnit_MathBoolConst"]
+        struct_paths = ["/Script/ControlRig.RigUnit_MathBoolConst"]
         pin_name = "Value"
     elif isinstance(value, int):
-        struct_paths = ["/Script/RigVM.RigVMFunction_MathIntConst", "/Script/ControlRig.RigUnit_MathIntConst"]
+        struct_paths = ["/Script/ControlRig.RigUnit_MathIntConst"]
         pin_name = "Value"
     elif isinstance(value, float):
-        struct_paths = ["/Script/RigVM.RigVMFunction_MathFloatConst", "/Script/ControlRig.RigUnit_MathFloatConst"]
+        struct_paths = ["/Script/ControlRig.RigUnit_MathFloatConst"]
         pin_name = "Value"
     else:
         return False
@@ -1555,7 +1552,6 @@ def _apply_constraint_point_instruction(controller, instruction, index, pin_map)
         pin_map=pin_map,
         suffix="Point",
         struct_paths=[
-            "/Script/RigVM.RigVMFunction_MathVectorLerp",
             "/Script/ControlRig.RigUnit_MathVectorLerp",
         ],
         target_pins=["A", "B"],
@@ -1572,9 +1568,7 @@ def _apply_constraint_orient_instruction(controller, instruction, index, pin_map
         pin_map=pin_map,
         suffix="Orient",
         struct_paths=[
-            "/Script/RigVM.RigVMFunction_MathQuaternionSlerp",
             "/Script/ControlRig.RigUnit_MathQuaternionSlerp",
-            "/Script/RigVM.RigVMFunction_MathRotatorLerp",
             "/Script/ControlRig.RigUnit_MathRotatorLerp",
         ],
         target_pins=["A", "B"],
@@ -1591,7 +1585,6 @@ def _apply_constraint_scale_instruction(controller, instruction, index, pin_map)
         pin_map=pin_map,
         suffix="Scale",
         struct_paths=[
-            "/Script/RigVM.RigVMFunction_MathVectorLerp",
             "/Script/ControlRig.RigUnit_MathVectorLerp",
         ],
         target_pins=["A", "B"],
@@ -2070,11 +2063,9 @@ def _apply_plus_minus_average_instruction(controller, instruction, index, pin_ma
 
     operation_struct_paths = {
         1: [
-            "/Script/RigVM.RigVMFunction_MathFloatAdd",
             "/Script/ControlRig.RigUnit_MathFloatAdd",
         ],
         2: [
-            "/Script/RigVM.RigVMFunction_MathFloatSub",
             "/Script/ControlRig.RigUnit_MathFloatSub",
         ],
     }
@@ -2120,7 +2111,6 @@ def _apply_plus_minus_average_instruction(controller, instruction, index, pin_ma
         divide_node = _try_add_unit_node(
             controller,
             [
-                "/Script/RigVM.RigVMFunction_MathFloatDiv",
                 "/Script/ControlRig.RigUnit_MathFloatDiv",
             ],
             divide_position,
@@ -2213,55 +2203,43 @@ def _utility_node_mapping(utility_type, operation=None, channel_hint=None):
     operation_modes = {
         "multiplyDivide": {
             1: [
-                "/Script/RigVM.RigVMFunction_MathFloatMul",
                 "/Script/ControlRig.RigUnit_MathFloatMul",
             ],
             2: [
-                "/Script/RigVM.RigVMFunction_MathFloatDiv",
                 "/Script/ControlRig.RigUnit_MathFloatDiv",
             ],
             3: [
-                "/Script/RigVM.RigVMFunction_MathFloatPow",
                 "/Script/ControlRig.RigUnit_MathFloatPow",
             ],
         },
         "plusMinusAverage": {
             1: [
-                "/Script/RigVM.RigVMFunction_MathFloatAdd",
                 "/Script/ControlRig.RigUnit_MathFloatAdd",
             ],
             2: [
-                "/Script/RigVM.RigVMFunction_MathFloatSub",
                 "/Script/ControlRig.RigUnit_MathFloatSub",
             ],
             3: [
-                "/Script/RigVM.RigVMFunction_MathFloatAdd",
                 "/Script/ControlRig.RigUnit_MathFloatAdd",
             ],
         },
         "condition": {
             0: [
-                "/Script/RigVM.RigVMFunction_MathFloatCondition",
                 "/Script/ControlRig.RigUnit_MathFloatCondition",
             ],
             1: [
-                "/Script/RigVM.RigVMFunction_MathFloatCondition",
                 "/Script/ControlRig.RigUnit_MathFloatCondition",
             ],
             2: [
-                "/Script/RigVM.RigVMFunction_MathFloatCondition",
                 "/Script/ControlRig.RigUnit_MathFloatCondition",
             ],
             3: [
-                "/Script/RigVM.RigVMFunction_MathFloatCondition",
                 "/Script/ControlRig.RigUnit_MathFloatCondition",
             ],
             4: [
-                "/Script/RigVM.RigVMFunction_MathFloatCondition",
                 "/Script/ControlRig.RigUnit_MathFloatCondition",
             ],
             5: [
-                "/Script/RigVM.RigVMFunction_MathFloatCondition",
                 "/Script/ControlRig.RigUnit_MathFloatCondition",
             ],
         },
@@ -2277,7 +2255,6 @@ def _utility_node_mapping(utility_type, operation=None, channel_hint=None):
     mappings = {
         "reverse": {
             "struct_paths": [
-                "/Script/RigVM.RigVMFunction_MathFloatNegate",
                 "/Script/ControlRig.RigUnit_MathFloatNegate",
             ],
             "pin_map": [(f"input{channel}", "Value"), (f"input.input{channel}", "Value")],
@@ -2317,7 +2294,6 @@ def _utility_node_mapping(utility_type, operation=None, channel_hint=None):
         },
         "multDoubleLinear": {
             "struct_paths": [
-                "/Script/RigVM.RigVMFunction_MathFloatMul",
                 "/Script/ControlRig.RigUnit_MathFloatMul",
             ],
             "pin_map": [("input1", "A"), ("input2", "B")],
@@ -2325,7 +2301,6 @@ def _utility_node_mapping(utility_type, operation=None, channel_hint=None):
         },
         "blendColors": {
             "struct_paths": [
-                "/Script/RigVM.RigVMFunction_MathFloatLerp",
                 "/Script/ControlRig.RigUnit_MathFloatLerp",
             ],
             "pin_map": [(f"color1{channel}", "A"), (f"color2{channel}", "B"), ("blender", "T")],
@@ -2357,7 +2332,6 @@ def _utility_node_mapping(utility_type, operation=None, channel_hint=None):
         },
         "clamp": {
             "struct_paths": [
-                "/Script/RigVM.RigVMFunction_MathFloatClamp",
                 "/Script/ControlRig.RigUnit_MathFloatClamp",
             ],
             "pin_map": [(f"input{channel}", "Value"), (f"min{channel}", "Min"), (f"max{channel}", "Max")],
@@ -2371,7 +2345,6 @@ def _utility_node_mapping(utility_type, operation=None, channel_hint=None):
         },
         "setRange": {
             "struct_paths": [
-                "/Script/RigVM.RigVMFunction_MathFloatRemap",
                 "/Script/ControlRig.RigUnit_MathFloatRemap",
             ],
             "pin_map": [
@@ -2393,7 +2366,6 @@ def _utility_node_mapping(utility_type, operation=None, channel_hint=None):
         },
         "remapValue": {
             "struct_paths": [
-                "/Script/RigVM.RigVMFunction_MathFloatRemap",
                 "/Script/ControlRig.RigUnit_MathFloatRemap",
             ],
             "pin_map": [
@@ -2415,7 +2387,7 @@ def _utility_node_mapping(utility_type, operation=None, channel_hint=None):
 def _ensure_solve_event_nodes(controller):
     """Try to seed forward/backward solve event nodes when available."""
     global _RIGSYS_SOLVE_EVENTS_SEEDED
-    if not hasattr(controller, "add_unit_node_from_struct_path") and not hasattr(controller, "add_unit_node"):
+    if not hasattr(controller, "add_unit_node_from_struct_path"):
         return
     if _RIGSYS_SOLVE_EVENTS_SEEDED:
         return
@@ -2443,89 +2415,38 @@ def _ensure_solve_event_nodes(controller):
 
 def _try_add_unit_node(controller, struct_paths, position, node_name):
     """Try to create a unit node from candidate struct paths."""
+    if not hasattr(controller, "add_unit_node_from_struct_path"):
+        return None
+
     cache_key = id(controller)
     missing_struct_paths = _MISSING_STRUCT_PATHS_CACHE.setdefault(cache_key, set())
 
     for struct_path in struct_paths:
         if struct_path in missing_struct_paths:
             continue
-        if hasattr(controller, "add_unit_node_from_struct_path"):
-            candidates = [
-                ((struct_path, "Execute", position, node_name), {}),
-                ((struct_path, "Execute", position), {}),
-                ((struct_path, position, node_name), {}),
-                ((struct_path, position), {}),
-                ((struct_path,), {}),
-            ]
-            for args, kwargs in candidates:
-                try:
-                    node_handle = controller.add_unit_node_from_struct_path(*args, **kwargs)
-                    return node_handle or node_name
-                except TypeError:
-                    continue
-                except Exception as exc:
-                    error_text = str(exc)
-                    if "already exists in the graph" in error_text:
-                        # Treat pre-existing event/function nodes as a successful lookup.
-                        return node_name
-                    if "Cannot find struct for path" in error_text:
-                        # Cache unavailable structs and skip retry storms for this controller.
-                        missing_struct_paths.add(struct_path)
-                        break
-                    _log_warning(f"Call failed for {controller.add_unit_node_from_struct_path}: {exc}")
-                    break
-
-        script_struct = _resolve_script_struct(struct_path)
-        if script_struct is None or not hasattr(controller, "add_unit_node"):
-            continue
-
-        add_candidates = [
-            ((script_struct, "Execute", node_name, position, False), {}),
-            ((script_struct, "Execute", node_name, position), {}),
-            ((script_struct, "Execute", position, node_name, False), {}),
-            ((script_struct, "Execute", position, node_name), {}),
-            ((script_struct, "Execute", position), {}),
-            ((script_struct, position), {}),
-            ((script_struct,), {}),
+        candidates = [
+            ((struct_path, "Execute", position, node_name), {}),
+            ((struct_path, "Execute", position), {}),
+            ((struct_path, position, node_name), {}),
+            ((struct_path, position), {}),
         ]
-        for args, kwargs in add_candidates:
+        for args, kwargs in candidates:
             try:
-                node_handle = controller.add_unit_node(*args, **kwargs)
+                node_handle = controller.add_unit_node_from_struct_path(*args, **kwargs)
                 return node_handle or node_name
             except TypeError:
                 continue
             except Exception as exc:
                 error_text = str(exc)
                 if "already exists in the graph" in error_text:
+                    # Treat pre-existing event/function nodes as a successful lookup.
                     return node_name
                 if "Cannot find struct for path" in error_text:
                     missing_struct_paths.add(struct_path)
                     break
-                _log_warning(f"Call failed for {controller.add_unit_node}: {exc}")
+                _log_warning(f"Call failed for {controller.add_unit_node_from_struct_path}: {exc}")
                 break
     return None
-
-
-def _resolve_script_struct(struct_path):
-    """Resolve ScriptStruct object from path for add_unit_node APIs."""
-    if struct_path in _SCRIPT_STRUCT_CACHE:
-        return _SCRIPT_STRUCT_CACHE[struct_path]
-
-    struct_object = None
-    if hasattr(unreal, "find_object"):
-        try:
-            struct_object = unreal.find_object(None, struct_path)
-        except Exception:
-            struct_object = None
-    if struct_object is None and hasattr(unreal, "load_object"):
-        try:
-            struct_object = unreal.load_object(None, struct_path)
-        except Exception:
-            struct_object = None
-
-    _SCRIPT_STRUCT_CACHE[struct_path] = struct_object
-    return struct_object
-
 
 def _resolve_node_path(node_handle, fallback_name):
     """Best-effort node path resolver for controller return variants."""
