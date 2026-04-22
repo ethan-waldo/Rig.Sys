@@ -1268,6 +1268,126 @@ def _point_target_behavior_bindings(module: Dict[str, Any], default_target_bone_
     return output
 
 
+def _build_module_math_model(module: Dict[str, Any]) -> Dict[str, Any]:
+    module_name = module.get("module_name", "Module")
+    module_class = module.get("module_class", "")
+    settings = module.get("module_settings", {})
+    equations: List[Dict[str, str]] = []
+    implemented: List[str] = []
+    approximations: List[str] = []
+
+    if module_class in {"Limb", "QuadLimb"}:
+        equations.extend(
+            [
+                {
+                    "id": "ik_fk_rotation_blend",
+                    "expression": "base_joint.rotate = lerp(FK.rotate, IK.rotate, IK_FK_Switch)",
+                    "source": "blendColors FK/IK rotation chain",
+                },
+                {
+                    "id": "ik_fk_visibility_reverse",
+                    "expression": "IK_visibility = 1.0 - IK_FK_Switch; FK_visibility = IK_FK_Switch",
+                    "source": "reverse node driving control visibility",
+                },
+            ]
+        )
+        implemented.append("staged_forward_backward_construction_transform_mapping")
+        approximations.append(
+            "IK_FK_Switch channel-level blend is approximated via staged transform propagation; "
+            "dedicated blend nodes are not yet emitted."
+        )
+        if bool(settings.get("foot", False)):
+            equations.append(
+                {
+                    "id": "foot_roll_pivot_chain",
+                    "expression": "Toe/Ball/Pivot/InBank/OutBank/Heel transforms compose in ordered parent pivot chain.",
+                    "source": "foot pivot hierarchy + multiplyDivide inv-toe roll compensation",
+                }
+            )
+            implemented.append("foot_roll_hierarchy_and_stage_links")
+            approximations.append(
+                "Foot roll math operators (inverse toe roll, per-axis compensation) are approximated by hierarchy "
+                "composition and staged links."
+            )
+        if module_class == "QuadLimb":
+            equations.append(
+                {
+                    "id": "quad_auto_roll_distribution",
+                    "expression": "Auto-roll controls are sampled along upper/lower segments with alpha-based interpolation.",
+                    "source": "upper/lower auto-roll control series",
+                }
+            )
+            implemented.append("quad_auto_roll_control_sampling")
+
+    if module_class == "Hand":
+        equations.extend(
+            [
+                {
+                    "id": "twist_splay_multiply_divide",
+                    "expression": "twist = rotateX * (-1-rate); splay = translateX * (-1.5*(1-rate)*aimDir)",
+                    "source": "twistSplay multiplyDivide network",
+                },
+                {
+                    "id": "updn_multiply_divide",
+                    "expression": "upDn = rotateZ * aimDir",
+                    "source": "upDn multiplyDivide network",
+                },
+            ]
+        )
+        implemented.append("hand_offset_chain_and_digit_driver_controls")
+        approximations.append(
+            "Per-digit multiplyDivide and rate falloff are approximated by staged transform mapping; "
+            "numeric operator graph emission is not yet complete."
+        )
+
+    if module_class == "PointTarget":
+        constrain_type = str(settings.get("constrain_type") or "point").lower()
+        equations.append(
+            {
+                "id": "weighted_target_constraint",
+                "expression": "target_transform = sum_i(weight_i * source_i_transform)",
+                "source": "targetsInfluence weighted constraints",
+            }
+        )
+        implemented.append("weighted_point_target_binding_generation")
+        if constrain_type not in {"parent", ""}:
+            approximations.append(
+                f"Constraint mode '{constrain_type}' uses full transform set fallback; channel-isolated "
+                "point/orient/scale/aim units are not yet emitted."
+            )
+        if bool(settings.get("maintain_offset", True)):
+            approximations.append(
+                "maintain_offset is approximated by staged construction initialization rather than exact Maya offset buffers."
+            )
+
+    if module_class == "RibbonBindIK":
+        equations.append(
+            {
+                "id": "ribbon_bind_distribution",
+                "expression": "bind_i = lerp(start, end, i/(count-1)); optional reverse chain inverts driver order",
+                "source": "bind and reverse control generation",
+            }
+        )
+        implemented.append("ribbon_bind_and_reverse_control_mapping")
+        approximations.append(
+            "Ribbon follicle and skinCluster deformation math is not yet recreated as explicit RigVM operators."
+        )
+
+    implementation_status = "implemented" if not approximations else "approximate"
+    if not equations and not implemented and not approximations:
+        implementation_status = "unknown"
+
+    return {
+        "module_name": module_name,
+        "module_class": module_class,
+        "implementation_status": implementation_status,
+        "equations": equations,
+        "implemented": implemented,
+        "approximations": approximations,
+        "approximation_gaps": approximations,
+    }
+
+
 def _execution_stage_specs() -> Dict[str, Dict[str, Any]]:
     return {
         "construction": {
@@ -1381,7 +1501,8 @@ def build_module_behavior_graph_plan(module: Dict[str, Any]) -> Dict[str, Any]:
     module_class = module.get("module_class", "")
     graph_module_name = _graph_safe_name(module_name)
     bindings = _control_to_proxy_bindings(module)
-    warnings: List[str] = []
+    math_model = _build_module_math_model(module)
+    warnings: List[str] = list(math_model.get("approximations", []))
     control_lookup = {control.get("name"): control for control in module.get("controls", []) if control.get("name")}
 
     if module_class == "PointTarget":
@@ -1397,15 +1518,6 @@ def build_module_behavior_graph_plan(module: Dict[str, Any]) -> Dict[str, Any]:
         ]
         point_bindings = _point_target_behavior_bindings(module, default_target_bone_name=default_target_bone_name)
         bindings.extend(point_bindings)
-        for binding in point_bindings:
-            if binding.get("constraint_type") not in {"parent", ""}:
-                warning = "PointTarget constrain_type channel filtering is approximated using full transform set."
-                if warning not in warnings:
-                    warnings.append(warning)
-            if binding.get("maintain_offset"):
-                warning = "PointTarget maintain_offset is approximated in generated RigVM graph."
-                if warning not in warnings:
-                    warnings.append(warning)
     nodes: List[Dict[str, Any]] = []
     links: List[Dict[str, Any]] = []
     pin_defaults: List[Dict[str, str]] = []
@@ -1465,6 +1577,7 @@ def build_module_behavior_graph_plan(module: Dict[str, Any]) -> Dict[str, Any]:
         "warnings": warnings,
         "stages": stage_summaries,
         "event_nodes": event_nodes,
+        "math_model": math_model,
     }
 
 
@@ -1477,6 +1590,7 @@ def build_behavior_graph_plan(translated_payload: Dict[str, Any]) -> Dict[str, A
     warnings: List[str] = []
     stages: Dict[str, Dict[str, int]] = {}
     event_nodes: List[Dict[str, Any]] = []
+    math_models: List[Dict[str, Any]] = []
     seen_event_nodes = set()
     for module_plan in module_plans:
         nodes.extend(module_plan["nodes"])
@@ -1496,6 +1610,8 @@ def build_behavior_graph_plan(translated_payload: Dict[str, Any]) -> Dict[str, A
                 continue
             seen_event_nodes.add(event_key)
             event_nodes.append(event_node)
+        if module_plan.get("math_model"):
+            math_models.append(module_plan["math_model"])
     return {
         "modules": module_plans,
         "nodes": nodes,
@@ -1504,6 +1620,7 @@ def build_behavior_graph_plan(translated_payload: Dict[str, Any]) -> Dict[str, A
         "warnings": warnings,
         "stages": stages,
         "event_nodes": event_nodes,
+        "math_models": math_models,
     }
 
 
@@ -1632,7 +1749,7 @@ def apply_behavior_graph_to_control_rig(control_rig, translated_payload: Dict[st
         return {"nodes_added": 0, "links_added": 0, "defaults_set": 0, "warnings": []}
 
     controller = _get_rigvm_controller(control_rig)
-    warnings: List[str] = []
+    warnings: List[str] = list(plan.get("warnings", []))
     nodes_added = 0
     for node_spec in plan["nodes"]:
         try:
