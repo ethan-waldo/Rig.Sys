@@ -915,6 +915,103 @@ def _create_control_rig(manifest):
     return control_rig_bp
 
 
+def _make_rig_element_key(name, preferred_type_names=None):
+    """Build a RigElementKey for modern hierarchy APIs, with string fallback."""
+    key_class = getattr(unreal, "RigElementKey", None)
+    element_type_enum = getattr(unreal, "RigElementType", None)
+    if key_class is None:
+        return name or ""
+
+    if not name:
+        try:
+            return key_class()
+        except Exception:
+            return ""
+
+    preferred_type_names = preferred_type_names or []
+    candidate_type_names = list(preferred_type_names) + ["BONE", "CONTROL", "NULL"]
+    seen = set()
+    for type_name in candidate_type_names:
+        if type_name in seen:
+            continue
+        seen.add(type_name)
+        element_type = getattr(element_type_enum, type_name, None) if element_type_enum else None
+        if element_type is None:
+            continue
+        for args, kwargs in (
+            ((), {"type": element_type, "name": name}),
+            ((), {"name": name, "type": element_type}),
+            ((name, element_type), {}),
+            ((element_type, name), {}),
+        ):
+            try:
+                return key_class(*args, **kwargs)
+            except Exception:
+                continue
+
+    for args, kwargs in (
+        ((), {"name": name}),
+        ((name,), {}),
+    ):
+        try:
+            return key_class(*args, **kwargs)
+        except Exception:
+            continue
+    return name
+
+
+def _make_control_value_from_transform(transform):
+    """Build RigControlValue from transform using best available API."""
+    if not hasattr(unreal, "RigHierarchy"):
+        return None
+    factory = unreal.RigHierarchy
+
+    if hasattr(factory, "make_control_value_from_transform"):
+        try:
+            return factory.make_control_value_from_transform(transform)
+        except Exception:
+            pass
+
+    if hasattr(factory, "make_control_value_from_euler_transform") and hasattr(unreal, "EulerTransform"):
+        try:
+            translation = None
+            if hasattr(transform, "translation"):
+                translation = transform.translation
+            elif hasattr(transform, "location"):
+                translation = transform.location
+
+            rotation = None
+            if hasattr(transform, "rotation"):
+                rotation = transform.rotation
+
+            scale = None
+            if hasattr(transform, "scale3d"):
+                scale = transform.scale3d
+            elif hasattr(transform, "scale"):
+                scale = transform.scale
+
+            euler = unreal.EulerTransform()
+            if translation is not None:
+                if hasattr(euler, "set_editor_property"):
+                    euler.set_editor_property("location", translation)
+                else:
+                    euler.location = translation
+            if rotation is not None:
+                if hasattr(euler, "set_editor_property"):
+                    euler.set_editor_property("rotation", rotation)
+                else:
+                    euler.rotation = rotation
+            if scale is not None:
+                if hasattr(euler, "set_editor_property"):
+                    euler.set_editor_property("scale", scale)
+                else:
+                    euler.scale = scale
+            return factory.make_control_value_from_euler_transform(euler)
+        except Exception:
+            pass
+    return None
+
+
 def _populate_hierarchy(control_rig_bp, manifest):
     if not hasattr(control_rig_bp, "get_hierarchy_controller"):
         _log_warning("Control Rig blueprint has no get_hierarchy_controller() API.")
@@ -928,10 +1025,18 @@ def _populate_hierarchy(control_rig_bp, manifest):
     for joint in manifest.get("joints", []):
         transform = _to_transform(joint["translation"], joint["rotation"], joint["scale"])
         parent = joint.get("parent") or ""
+        parent_key = _make_rig_element_key(parent, ["BONE", "NULL", "CONTROL"])
+        bone_type = None
+        if hasattr(unreal, "RigBoneType"):
+            bone_type = getattr(unreal.RigBoneType, "IMPORTED", None) or getattr(unreal.RigBoneType, "USER", None)
         if hasattr(hierarchy, "add_bone"):
             _try_call(
                 hierarchy.add_bone,
                 [
+                    ((joint["name"], parent_key, transform, True, bone_type, False), {}),
+                    ((joint["name"], parent_key, transform, True, bone_type), {}),
+                    ((joint["name"], parent_key, transform, True), {}),
+                    ((joint["name"], parent_key, transform), {"setup_undo": False}),
                     ((joint["name"], parent, transform), {"setup_undo": False}),
                     ((joint["name"], parent, transform, False), {}),
                     ((joint["name"], parent, transform), {}),
@@ -941,6 +1046,8 @@ def _populate_hierarchy(control_rig_bp, manifest):
     for control in manifest.get("controls", []):
         transform = _to_transform(control["translation"], control["rotation"], control["scale"])
         parent = control.get("parent") or ""
+        parent_key = _make_rig_element_key(parent, ["NULL", "CONTROL", "BONE"])
+        control_value = _make_control_value_from_transform(transform)
 
         control_added = False
         if hasattr(hierarchy, "add_control") and hasattr(unreal, "RigControlSettings"):
@@ -948,20 +1055,37 @@ def _populate_hierarchy(control_rig_bp, manifest):
             if hasattr(unreal, "RigControlType"):
                 control_settings.control_type = unreal.RigControlType.EULER_TRANSFORM
 
-            control_added = _try_call(
-                hierarchy.add_control,
+            add_control_candidates = []
+            if control_value is not None:
+                add_control_candidates.extend(
+                    [
+                        ((control["name"], parent_key, control_settings, control_value, False), {}),
+                        ((control["name"], parent_key, control_settings, control_value), {}),
+                        ((control["name"], parent, control_settings, control_value, False), {}),
+                        ((control["name"], parent, control_settings, control_value), {}),
+                    ]
+                )
+            add_control_candidates.extend(
                 [
                     ((control["name"], parent, control_settings, transform), {"setup_undo": False}),
                     ((control["name"], parent, control_settings, transform, transform), {"setup_undo": False}),
                     ((control["name"], parent, control_settings, transform, transform, False), {}),
                     ((control["name"], parent, control_settings, transform, transform, False, False), {}),
-                ],
+                ]
+            )
+
+            control_added = _try_call(
+                hierarchy.add_control,
+                add_control_candidates,
             )
 
         if not control_added and hasattr(hierarchy, "add_null"):
             _try_call(
                 hierarchy.add_null,
                 [
+                    ((control["name"], parent_key, transform, True, False), {}),
+                    ((control["name"], parent_key, transform, True), {}),
+                    ((control["name"], parent_key, transform), {"setup_undo": False}),
                     ((control["name"], parent, transform), {"setup_undo": False}),
                     ((control["name"], parent, transform, False), {}),
                     ((control["name"], parent, transform), {}),
@@ -2291,7 +2415,7 @@ def _utility_node_mapping(utility_type, operation=None, channel_hint=None):
 def _ensure_solve_event_nodes(controller):
     """Try to seed forward/backward solve event nodes when available."""
     global _RIGSYS_SOLVE_EVENTS_SEEDED
-    if not hasattr(controller, "add_unit_node_from_struct_path"):
+    if not hasattr(controller, "add_unit_node_from_struct_path") and not hasattr(controller, "add_unit_node"):
         return
     if _RIGSYS_SOLVE_EVENTS_SEEDED:
         return
