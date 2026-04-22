@@ -9,19 +9,27 @@ class ExportModuleBase(moduleBase.ModuleBase):
     """Base class for export modules."""
 
     def __init__(self, rig, exportPath: str, label: str = "", buildOrder: int = 5000,
-                 isMuted: bool = False, mirror: bool = False) -> None:
+                 isMuted: bool = False, mirror: bool = False, extension: str = "",
+                 fileNameSuffix: str = "_FBX") -> None:
         """Initialize the module."""
         super().__init__(rig=rig, label=label, buildOrder=buildOrder, isMuted=isMuted, mirror=mirror)
 
         self.exportPath = exportPath
 
-        self.fileName = f"{self._rig.name}_FBX"
-        self.extension: str = ""
+        self.fileName = f"{self._rig.name}{fileNameSuffix}"
+        self.extension = extension
+        self.fullExportPath = self._resolveFullExportPath()
 
+    def _resolveFullExportPath(self) -> str:
+        """Return absolute export output path for file or directory style inputs."""
         if self.checkIfExportPathIsFile(self.exportPath):
-            self.fullExportPath = self.exportPath
-        else:
-            self.fullExportPath = os.path.join(self.exportPath, self.fileName + self.extension)
+            return self.exportPath
+        return os.path.join(self.exportPath, self.fileName + self.extension)
+
+    def setExtension(self, extension: str) -> None:
+        """Update extension and refresh resolved output path."""
+        self.extension = extension
+        self.fullExportPath = self._resolveFullExportPath()
 
     @staticmethod
     def checkIfExportPathIsFile(path: str) -> bool:

@@ -16,6 +16,55 @@ Modular rigging system for Autodesk Maya.
 Characters are stored as Python files that subclass from the `Character` class. Data such as proxy translations and skin
 weights are stored in JSON files.
 
+## Maya + Python compatibility
+
+Rig.Sys now targets modern Maya Python runtimes (`python>=3.10`), which aligns with current Maya releases.
+
+## Exporting Maya rigs to Unreal Control Rig
+
+Rig.Sys includes an `UnrealControlRigExport` module that writes:
+
+- A rig manifest (`.json`) with joints, controls, hierarchy, transforms, constraint metadata, graph utility nodes, and detected IK/FK switch systems.
+- Constraint metadata, connection metadata, and user-defined control attributes for parity-oriented reconstruction passes.
+- An FBX file (optional).
+- A generated Unreal Python script (`.py`) that uses Unreal scripting APIs to:
+  - import the FBX as skeletal content, and
+  - create and populate a Control Rig asset,
+  - attempt best-effort parent-constraint reconstruction, and
+  - mirror custom control attributes as Control Rig member variables when supported by the installed Unreal API.
+
+Example:
+
+```python
+import os
+
+import rigsys.modules.export as export
+
+self.exportModules = {
+    "UnrealControlRigExport": export.UnrealControlRigExport(
+        self,
+        exportPath=os.path.join(self.exampleCharacterFolder, "exports"),
+        exportFBX=True,
+        exportAll=True,
+        createUnrealScript=True,
+        controlRigPackagePath="/Game/Characters/Rigs",
+        controlRigName="ExampleRig_ControlRig",
+        skeletalMeshImportPath="/Game/Characters/Meshes",
+    )
+}
+```
+
+Then in Unreal, run the generated Python script in the Unreal Python console/editor to create the Control Rig asset.
+
+Current parity pipeline behavior:
+- Rebuilds Control Rig hierarchy (bones/controls) and custom control attributes.
+- Applies best-effort parent-constraint parenting reconstruction.
+- Detects common IK/FK blend + visibility switch systems and stores them as structured metadata for iterative graph reconstruction passes.
+- Converts `rigvm_instructions` into best-effort RigVM unit/link construction for common IK/FK blend/visibility, scalar logic-constant patterns, non-parent constraint blends (point/orient/scale/aim), and mapped utility nodes (`reverse`, `multiplyDivide`, `plusMinusAverage`, `multDoubleLinear`, `blendColors`) when Unreal controller APIs are available.
+- Persists high-fidelity rig metadata (`constraints`, `connections`, `rig_logic_nodes`, `ik_fk_systems`, `rigvm_instructions`) onto the generated asset metadata for post-processing tooling.
+- Performs automatic post-pass connection linking by mapping Maya plugs to generated RigVM pins and replaying manifest connections where APIs permit.
+- Falls back to RigVM comment-node payload handoff when Unreal RigVM unit/link APIs are unavailable in the running version.
+
 ## Motion module parenting
 
 Motion modules can be parented to other motion modules. This is done by setting the `parent` attribute on the module to the name of the parent module. If the name of the parent module is not found, an error will be raised when the character is built.

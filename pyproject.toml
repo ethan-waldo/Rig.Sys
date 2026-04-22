@@ -10,7 +10,7 @@ description = "Modular rigging system for Autodesk Maya."
 keywords = ["autodesk", "maya", "modular", "rig", "rigging", "system", "autorig"]
 license = {file = "LICENSE"}
 readme = "README.md"
-requires-python = ">=2.7.0"
+requires-python = ">=3.10"
 
 [project.urls]
 "Homepage" = "https://github.com/DeRemerJD/Rig.Sys"
