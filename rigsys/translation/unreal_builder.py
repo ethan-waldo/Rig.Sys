@@ -1170,21 +1170,102 @@ def augment_payload_with_generated_controls(translated_payload: Dict[str, Any]) 
     return payload
 
 
-def _control_to_proxy_bindings(module: Dict[str, Any]) -> List[Dict[str, str]]:
+def _control_depth_map(module: Dict[str, Any]) -> Dict[str, int]:
+    controls = module.get("controls", [])
+    parent_lookup = {control.get("name"): control.get("parent_control") for control in controls if control.get("name")}
+    depth_map: Dict[str, int] = {}
+
+    def resolve_depth(name: str) -> int:
+        cached = depth_map.get(name)
+        if cached is not None:
+            return cached
+        parent = parent_lookup.get(name)
+        if not parent or parent == name:
+            depth_map[name] = 0
+            return 0
+        depth = resolve_depth(parent) + 1
+        depth_map[name] = depth
+        return depth
+
+    for control_name in parent_lookup.keys():
+        resolve_depth(control_name)
+    return depth_map
+
+
+def _control_to_proxy_bindings(module: Dict[str, Any]) -> List[Dict[str, Any]]:
     module_name = module.get("module_name", "")
-    bindings: List[Dict[str, str]] = []
-    for control in module.get("controls", []):
+    controls = module.get("controls", [])
+    depth_map = _control_depth_map(module)
+    ordered_controls = sorted(controls, key=lambda control: (depth_map.get(control.get("name", ""), 0), control.get("name", "")))
+    bindings: List[Dict[str, Any]] = []
+    for control in ordered_controls:
         control_name = control.get("name")
         driven_proxy = control.get("driven_proxy")
         if not control_name or not driven_proxy:
             continue
         bindings.append(
             {
-                "control_name": control_name,
-                "proxy_bone_name": f"{module_name}_{driven_proxy}_Proxy",
+                "source_control": control_name,
+                "target_item_type": "Bone",
+                "target_item_name": f"{module_name}_{driven_proxy}_Proxy",
+                "weight": 1.0,
+                "source_space": "GlobalSpace",
+                "target_space": "GlobalSpace",
+                "constraint_type": "parent",
+                "tag": "control_proxy_bind",
             }
         )
     return bindings
+
+
+def _point_target_behavior_bindings(module: Dict[str, Any], default_target_bone_name: Optional[str]) -> List[Dict[str, Any]]:
+    controls = module.get("controls", [])
+    settings = module.get("module_settings", {})
+    effect_targets = bool(settings.get("effect_targets", False))
+    constrain_type = str(settings.get("constrain_type") or "point").lower()
+    maintain_offset = bool(settings.get("maintain_offset", True))
+    influences = list(settings.get("targets_influence", []) or [])
+
+    root_control = next((control for control in controls if control.get("role") == "point_target"), None)
+    source_root_name = root_control.get("name") if root_control else None
+    ref_controls = [control for control in controls if control.get("role") == "point_target_reference"]
+    output: List[Dict[str, Any]] = []
+    for index, control in enumerate(ref_controls):
+        metadata = control.get("metadata") or {}
+        target_node = metadata.get("target_node")
+        influence_value = metadata.get("influence")
+        if influence_value is None and index < len(influences):
+            influence_value = influences[index]
+        try:
+            weight = float(influence_value)
+        except (TypeError, ValueError):
+            weight = 1.0
+        if weight < 0.0:
+            weight = 0.0
+
+        if effect_targets:
+            source_control = source_root_name
+            target_item_name = str(target_node or "")
+        else:
+            source_control = control.get("name")
+            target_item_name = str(default_target_bone_name or "")
+        if not source_control or not target_item_name:
+            continue
+
+        output.append(
+            {
+                "source_control": source_control,
+                "target_item_type": "Bone",
+                "target_item_name": target_item_name,
+                "weight": weight,
+                "source_space": "GlobalSpace",
+                "target_space": "GlobalSpace",
+                "constraint_type": constrain_type,
+                "maintain_offset": maintain_offset,
+                "tag": "point_target_constraint",
+            }
+        )
+    return output
 
 
 def build_module_behavior_graph_plan(module: Dict[str, Any]) -> Dict[str, Any]:
@@ -1194,16 +1275,46 @@ def build_module_behavior_graph_plan(module: Dict[str, Any]) -> Dict[str, Any]:
     outside Unreal.
     """
     module_name = module.get("module_name", "Module")
+    module_class = module.get("module_class", "")
     graph_module_name = _graph_safe_name(module_name)
     bindings = _control_to_proxy_bindings(module)
+    warnings: List[str] = []
+    control_lookup = {control.get("name"): control for control in module.get("controls", []) if control.get("name")}
+
+    if module_class == "PointTarget":
+        point_root = next((control for control in module.get("controls", []) if control.get("role") == "point_target"), None)
+        default_target_bone_name = None
+        if point_root and point_root.get("driven_proxy"):
+            default_target_bone_name = f"{module_name}_{point_root['driven_proxy']}_Proxy"
+
+        bindings = [
+            binding
+            for binding in bindings
+            if control_lookup.get(binding["source_control"], {}).get("role") != "point_target_reference"
+        ]
+        point_bindings = _point_target_behavior_bindings(module, default_target_bone_name=default_target_bone_name)
+        bindings.extend(point_bindings)
+        for binding in point_bindings:
+            if binding.get("constraint_type") not in {"parent", ""}:
+                warning = "PointTarget constrain_type channel filtering is approximated using full transform set."
+                if warning not in warnings:
+                    warnings.append(warning)
+            if binding.get("maintain_offset"):
+                warning = "PointTarget maintain_offset is approximated in generated RigVM graph."
+                if warning not in warnings:
+                    warnings.append(warning)
     nodes: List[Dict[str, Any]] = []
     links: List[Dict[str, str]] = []
     pin_defaults: List[Dict[str, str]] = []
     exec_source_pin = "BeginExecution.ExecuteContext"
 
     for index, binding in enumerate(bindings):
-        control_name = binding["control_name"]
-        proxy_bone_name = binding["proxy_bone_name"]
+        control_name = binding["source_control"]
+        target_item_name = binding["target_item_name"]
+        target_item_type = binding.get("target_item_type", "Bone")
+        source_space = binding.get("source_space", "GlobalSpace")
+        target_space = binding.get("target_space", "GlobalSpace")
+        weight = float(binding.get("weight", 1.0))
         get_node = f"{graph_module_name}_GetCtrl_{index}"
         set_node = f"{graph_module_name}_SetProxy_{index}"
 
@@ -1227,10 +1338,10 @@ def build_module_behavior_graph_plan(module: Dict[str, Any]) -> Dict[str, Any]:
         pin_defaults.extend(
             [
                 {"pin_path": f"{get_node}.Control", "value": str(control_name)},
-                {"pin_path": f"{get_node}.Space", "value": "GlobalSpace"},
-                {"pin_path": f"{set_node}.Item", "value": f'(Type=Bone,Name="{proxy_bone_name}")'},
-                {"pin_path": f"{set_node}.Space", "value": "GlobalSpace"},
-                {"pin_path": f"{set_node}.Weight", "value": "1.0"},
+                {"pin_path": f"{get_node}.Space", "value": str(source_space)},
+                {"pin_path": f"{set_node}.Item", "value": f'(Type={target_item_type},Name="{target_item_name}")'},
+                {"pin_path": f"{set_node}.Space", "value": str(target_space)},
+                {"pin_path": f"{set_node}.Weight", "value": str(weight)},
                 {"pin_path": f"{set_node}.bInitial", "value": "False"},
             ]
         )
@@ -1248,6 +1359,7 @@ def build_module_behavior_graph_plan(module: Dict[str, Any]) -> Dict[str, Any]:
         "nodes": nodes,
         "links": links,
         "pin_defaults": pin_defaults,
+        "warnings": warnings,
     }
 
 
@@ -1257,15 +1369,21 @@ def build_behavior_graph_plan(translated_payload: Dict[str, Any]) -> Dict[str, A
     nodes: List[Dict[str, Any]] = []
     links: List[Dict[str, str]] = []
     pin_defaults: List[Dict[str, str]] = []
+    warnings: List[str] = []
     for module_plan in module_plans:
         nodes.extend(module_plan["nodes"])
         links.extend(module_plan["links"])
         pin_defaults.extend(module_plan["pin_defaults"])
+        for warning in module_plan.get("warnings", []):
+            warning_message = f"{module_plan.get('module_name', 'Module')}: {warning}"
+            if warning_message not in warnings:
+                warnings.append(warning_message)
     return {
         "modules": module_plans,
         "nodes": nodes,
         "links": links,
         "pin_defaults": pin_defaults,
+        "warnings": warnings,
     }
 
 

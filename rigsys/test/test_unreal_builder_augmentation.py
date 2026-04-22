@@ -458,12 +458,35 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
                             "rotation": [0, 0, 0],
                             "driven_proxy": "Point",
                             "parent_proxy": None,
+                        },
+                        {
+                            "name": "M_Target_Target_0_CTRL",
+                            "role": "point_target_reference",
+                            "shape": "circle",
+                            "scale": [1, 1, 1],
+                            "position": [0, 0, 0],
+                            "rotation": [0, 0, 0],
+                            "driven_proxy": None,
+                            "parent_proxy": None,
+                            "metadata": {"target_node": "A", "influence": 0.7},
+                        },
+                        {
+                            "name": "M_Target_Target_1_CTRL",
+                            "role": "point_target_reference",
+                            "shape": "circle",
+                            "scale": [1, 1, 1],
+                            "position": [0, 0, 0],
+                            "rotation": [0, 0, 0],
+                            "driven_proxy": None,
+                            "parent_proxy": None,
+                            "metadata": {"target_node": "B", "influence": 0.3},
                         }
                     ],
                     "module_settings": {
                         "targets": ["A", "B"],
                         "targets_influence": [0.7, 0.3],
                         "constrain_type": "point",
+                        "effect_targets": True,
                         "maintain_offset": True,
                     },
                 },
@@ -477,4 +500,21 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         self.assertGreater(len(plan.get("pin_defaults", [])), 0)
         self.assertTrue(any("SetTransform" in node["struct_path"] for node in plan["nodes"]))
         self.assertTrue(any("GetControlTransform" in node["struct_path"] for node in plan["nodes"]))
+        self.assertGreater(len(plan.get("warnings", [])), 0)
+
+        point_module = next(module for module in plan["modules"] if module["module_name"] == "M_Target")
+        self.assertTrue(
+            any(
+                pin_default["pin_path"].endswith("SetProxy_1.Weight") and pin_default["value"] == "0.7"
+                for pin_default in point_module["pin_defaults"]
+            )
+        )
+        self.assertTrue(
+            any(
+                '(Type=Bone,Name="A")' in pin_default["value"]
+                or '(Type=Bone,Name="B")' in pin_default["value"]
+                for pin_default in point_module["pin_defaults"]
+                if pin_default["pin_path"].endswith(".Item")
+            )
+        )
 
