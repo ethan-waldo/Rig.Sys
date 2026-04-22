@@ -56,6 +56,26 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         self.assertIn("L_ArmRail_1_Rev_CTRL", generated_names)
         self.assertIn("L_ArmRail_Start_Rev_CTRL", generated_names)
 
+    def test_fk_generates_segment_driver_controls(self):
+        module = {
+            "module_name": "M_Spine",
+            "module_class": "FK",
+            "proxies": [
+                {"name": "Start", "parent": None, "position": [0, 0, 0], "rotation": [0, 0, 0]},
+                {"name": "End", "parent": "Start", "position": [0, 9, 0], "rotation": [0, 0, 0]},
+            ],
+            "controls": [],
+            "module_settings": {
+                "segments": 4,
+                "ctrl_scale": [1, 1, 1],
+            },
+        }
+        generated = generate_augmented_controls(module)
+        generated_names = {control["name"] for control in generated}
+
+        self.assertIn("M_Spine_SegmentDriver_0_CTRL", generated_names)
+        self.assertIn("M_Spine_SegmentDriver_3_CTRL", generated_names)
+
     def test_limb_generates_pv_and_foot_roll_controls(self):
         module = {
             "module_name": "L_Leg",
@@ -87,6 +107,31 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         self.assertIn("L_Leg_PV_CTRL", generated_names)
         self.assertIn("L_Leg_Global_Foot_CTRL", generated_names)
         self.assertIn("L_Leg_Toe_Foot_CTRL", generated_names)
+
+    def test_limb_generates_deform_chain_and_floor_anchor(self):
+        module = {
+            "module_name": "L_Arm",
+            "module_class": "Limb",
+            "proxies": [
+                {"name": "Root", "parent": None, "position": [0, 10, 0], "rotation": [0, 0, 0]},
+                {"name": "Start", "parent": "Root", "position": [0, 9, 0], "rotation": [0, 0, 0]},
+                {"name": "Mid", "parent": "Start", "position": [2, 6, 0], "rotation": [0, 0, 0]},
+                {"name": "End", "parent": "Mid", "position": [4, 3, 0], "rotation": [0, 0, 0]},
+            ],
+            "controls": [],
+            "module_settings": {
+                "name_set": {"Root": "Root", "Start": "Start", "Mid": "Mid", "End": "End"},
+                "number_of_joints": 5,
+                "ik_ctrl_to_floor": True,
+                "ctrl_scale": [1, 1, 1],
+            },
+        }
+        generated = generate_augmented_controls(module)
+        generated_names = {control["name"] for control in generated}
+
+        self.assertIn("L_Arm_Deform_0_CTRL", generated_names)
+        self.assertIn("L_Arm_Deform_4_CTRL", generated_names)
+        self.assertIn("L_Arm_IKFloor_CTRL", generated_names)
 
     def test_hand_generates_explicit_offset_chain_controls(self):
         module = {
@@ -137,6 +182,35 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         self.assertIn("L_Hand_Thumb_0_Twist_CTRL", generated_names)
         self.assertIn("L_Hand_Thumb_0_Splay_CTRL", generated_names)
 
+    def test_hand_generates_digit_driver_controls(self):
+        module = {
+            "module_name": "L_Hand",
+            "module_class": "Hand",
+            "proxies": [
+                {"name": "Root", "parent": None, "position": [0, 0, 0], "rotation": [0, 0, 0]},
+                {"name": "Global", "parent": "Root", "position": [0, 0, 0], "rotation": [0, 0, 0]},
+                {"name": "Finger0_0", "parent": "Root", "position": [1, 0, 0], "rotation": [0, 0, 0]},
+                {"name": "Finger0_1", "parent": "Finger0_0", "position": [2, 0, 0], "rotation": [0, 0, 0]},
+                {"name": "Thumb_0", "parent": "Root", "position": [-1, 0, 0], "rotation": [0, 0, 0]},
+                {"name": "Thumb_1", "parent": "Thumb_0", "position": [-2, 0, 0], "rotation": [0, 0, 0]},
+            ],
+            "controls": [],
+            "module_settings": {
+                "number_of_fingers": 1,
+                "number_of_finger_joints": 2,
+                "number_of_thumb_joints": 2,
+                "ctrl_scale": [1, 1, 1],
+            },
+        }
+        generated = generate_augmented_controls(module)
+        generated_names = {control["name"] for control in generated}
+
+        self.assertIn("L_Hand_Finger0_Curl_CTRL", generated_names)
+        self.assertIn("L_Hand_Finger0_0_Driver_CTRL", generated_names)
+        self.assertIn("L_Hand_Finger0_1_Driver_CTRL", generated_names)
+        self.assertIn("L_Hand_Thumb_Curl_CTRL", generated_names)
+        self.assertIn("L_Hand_Thumb_0_Driver_CTRL", generated_names)
+
     def test_quad_limb_generates_auto_roll_controls(self):
         module = {
             "module_name": "L_QuadLeg",
@@ -162,6 +236,81 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         self.assertIn("L_QuadLeg_UpperAutoRoll_2_CTRL", generated_names)
         self.assertIn("L_QuadLeg_LowerAutoRoll_4_CTRL", generated_names)
         self.assertIn("L_QuadLeg_AutoRollSettings_CTRL", generated_names)
+
+    def test_lips_generates_segment_and_jaw_controls(self):
+        module = {
+            "module_name": "M_Lips",
+            "module_class": "Lips",
+            "proxies": [
+                {"name": "Mouth", "parent": None, "position": [0, 0, 0], "rotation": [0, 0, 0]},
+                {"name": "L_CornerLip", "parent": "Mouth", "position": [2, 0, 0], "rotation": [0, 0, 0]},
+                {"name": "R_CornerLip", "parent": "Mouth", "position": [-2, 0, 0], "rotation": [0, 0, 0]},
+                {"name": "M_UpLip", "parent": "Mouth", "position": [0, 1, 0], "rotation": [0, 0, 0]},
+                {"name": "M_LoLip", "parent": "Mouth", "position": [0, -1, 0], "rotation": [0, 0, 0]},
+            ],
+            "controls": [],
+            "module_settings": {
+                "lip_segments": 3,
+                "jaw_target": "jaw_CTRL",
+                "ctrl_scale": [1, 1, 1],
+            },
+        }
+        generated = generate_augmented_controls(module)
+        generated_names = {control["name"] for control in generated}
+
+        self.assertIn("M_Lips_UpperSegment_0_CTRL", generated_names)
+        self.assertIn("M_Lips_LowerSegment_2_CTRL", generated_names)
+        self.assertIn("M_Lips_JawFollow_CTRL", generated_names)
+
+    def test_follicle_eye_generates_segment_attach_and_aim_controls(self):
+        module = {
+            "module_name": "L_Eye",
+            "module_class": "FollicleEye",
+            "proxies": [
+                {"name": "Eyeball", "parent": None, "position": [1, 2, 3], "rotation": [0, 0, 0]},
+                {"name": "In", "parent": "Eyeball", "position": [2, 2, 3], "rotation": [0, 0, 0]},
+                {"name": "Out", "parent": "Eyeball", "position": [0, 2, 3], "rotation": [0, 0, 0]},
+                {"name": "Up", "parent": "Eyeball", "position": [1, 2.4, 3], "rotation": [0, 0, 0]},
+                {"name": "Lo", "parent": "Eyeball", "position": [1, 1.6, 3], "rotation": [0, 0, 0]},
+            ],
+            "controls": [],
+            "module_settings": {
+                "lid_segments": 2,
+                "follicle_surface": "faceSurface",
+                "eyeball": True,
+                "ctrl_scale": [1, 1, 1],
+            },
+        }
+        generated = generate_augmented_controls(module)
+        generated_names = {control["name"] for control in generated}
+
+        self.assertIn("L_Eye_LidUpperSegment_0_CTRL", generated_names)
+        self.assertIn("L_Eye_LidLowerSegment_1_CTRL", generated_names)
+        self.assertIn("L_Eye_LidAttach_CTRL", generated_names)
+        self.assertIn("L_Eye_EyeballAim_CTRL", generated_names)
+
+    def test_axis_guides_generate_from_module_metadata(self):
+        module = {
+            "module_name": "M_Chest",
+            "module_class": "FK",
+            "proxies": [
+                {"name": "Start", "parent": None, "position": [0, 0, 0], "rotation": [0, 0, 0]},
+            ],
+            "controls": [],
+            "module_settings": {
+                "segments": 1,
+                "ctrl_scale": [1, 1, 1],
+            },
+            "metadata": {
+                "aim_axis": "+x",
+                "up_axis": "-z",
+            },
+        }
+        generated = generate_augmented_controls(module)
+        generated_names = {control["name"] for control in generated}
+
+        self.assertIn("M_Chest_AimGuide_CTRL", generated_names)
+        self.assertIn("M_Chest_UpGuide_CTRL", generated_names)
 
     def test_augment_payload_materializes_generated_controls(self):
         payload = {

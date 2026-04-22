@@ -62,6 +62,28 @@ def _vec_lerp(start: List[float], end: List[float], alpha: float) -> List[float]
     ]
 
 
+def _axis_to_vec(axis: Optional[str]) -> List[float]:
+    if not axis:
+        return [0.0, 0.0, 0.0]
+    axis = axis.strip().lower()
+    sign = -1.0 if axis.startswith("-") else 1.0
+    key = axis[-1] if axis else "x"
+    if key == "x":
+        return [sign, 0.0, 0.0]
+    if key == "y":
+        return [0.0, sign, 0.0]
+    if key == "z":
+        return [0.0, 0.0, sign]
+    return [0.0, 0.0, 0.0]
+
+
+def _module_shape(settings: Dict[str, Any], fallback: str = "Circle") -> str:
+    shape = settings.get("ctrl_shape")
+    if shape is None:
+        return fallback
+    return str(shape)
+
+
 def _build_proxy_map(module: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     proxies = module.get("proxies", [])
     result: Dict[str, Dict[str, Any]] = {}
@@ -378,7 +400,7 @@ def _add_limb_foot_roll(module: Dict[str, Any], proxy_map: Dict[str, Dict[str, A
             _make_control(
                 name=ctrl_name,
                 role="foot_roll",
-                shape="Circle",
+                shape=_module_shape(settings, "Circle"),
                 scale=settings.get("ctrl_scale", [1.0, 1.0, 1.0]),
                 position=proxy.get("position", [0.0, 0.0, 0.0]),
                 rotation=proxy.get("rotation", [0.0, 0.0, 0.0]),
@@ -388,6 +410,106 @@ def _add_limb_foot_roll(module: Dict[str, Any], proxy_map: Dict[str, Dict[str, A
             )
         )
         parent = ctrl_name
+    return output
+
+
+def _add_limb_deform_controls(module: Dict[str, Any], proxy_map: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    settings = module.get("module_settings", {})
+    count = int(settings.get("number_of_joints") or 0)
+    if count <= 1:
+        return []
+    name_set = settings.get("name_set") or {}
+    start_name = name_set.get("Start", "Start")
+    end_name = name_set.get("End", "End")
+    start_proxy = proxy_map.get(start_name)
+    end_proxy = proxy_map.get(end_name)
+    if not start_proxy or not end_proxy:
+        return []
+
+    start_pos = _vec(start_proxy.get("position"))
+    end_pos = _vec(end_proxy.get("position"))
+    start_rot = _vec(start_proxy.get("rotation"))
+    end_rot = _vec(end_proxy.get("rotation"))
+    base_scale = _vec(settings.get("ctrl_scale"), [1.0, 1.0, 1.0])
+
+    output = []
+    parent = None
+    for idx in range(count):
+        alpha = 0.0 if count == 1 else float(idx) / float(count - 1)
+        ctrl_name = f"{module['module_name']}_Deform_{idx}_CTRL"
+        output.append(
+            _make_control(
+                name=ctrl_name,
+                role="limb_deform",
+                shape=_module_shape(settings, "Circle"),
+                scale=_vec_scale(base_scale, 0.6),
+                position=_vec_lerp(start_pos, end_pos, alpha),
+                rotation=_vec_lerp(start_rot, end_rot, alpha),
+                parent_control=parent,
+                driven_proxy=end_name,
+                metadata={"index": idx, "count": count},
+            )
+        )
+        parent = ctrl_name
+    return output
+
+
+def _add_limb_ik_floor_anchor(module: Dict[str, Any], proxy_map: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    settings = module.get("module_settings", {})
+    if not settings.get("ik_ctrl_to_floor"):
+        return []
+    name_set = settings.get("name_set") or {}
+    end_name = name_set.get("End", "End")
+    end_proxy = proxy_map.get(end_name)
+    if not end_proxy:
+        return []
+    pos = _vec(end_proxy.get("position"))
+    floor_pos = [pos[0], 0.0, pos[2]]
+    return [
+        _make_control(
+            name=f"{module['module_name']}_IKFloor_CTRL",
+            role="ik_floor_anchor",
+            shape=_module_shape(settings, "Square"),
+            scale=_vec_scale(_vec(settings.get("ctrl_scale"), [1.0, 1.0, 1.0]), 0.75),
+            position=floor_pos,
+            rotation=[0.0, 0.0, 0.0],
+            driven_proxy=end_name,
+        )
+    ]
+
+
+def _add_segment_driver_controls(module: Dict[str, Any], proxy_map: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    settings = module.get("module_settings", {})
+    count = int(settings.get("segments") or 0)
+    if count <= 0:
+        return []
+    start_proxy = proxy_map.get("Start")
+    end_proxy = proxy_map.get("End")
+    if not start_proxy or not end_proxy:
+        return []
+
+    start_pos = _vec(start_proxy.get("position"))
+    end_pos = _vec(end_proxy.get("position"))
+    start_rot = _vec(start_proxy.get("rotation"))
+    end_rot = _vec(end_proxy.get("rotation"))
+    output = []
+    parent = None
+    for idx in range(count):
+        alpha = 0.0 if count == 1 else float(idx) / float(count - 1)
+        name = f"{module['module_name']}_SegmentDriver_{idx}_CTRL"
+        output.append(
+            _make_control(
+                name=name,
+                role="segment_driver",
+                shape=_module_shape(settings, "Circle"),
+                scale=_vec_scale(_vec(settings.get("ctrl_scale"), [1.0, 1.0, 1.0]), 0.7),
+                position=_vec_lerp(start_pos, end_pos, alpha),
+                rotation=_vec_lerp(start_rot, end_rot, alpha),
+                parent_control=parent,
+                metadata={"segment_index": idx},
+            )
+        )
+        parent = name
     return output
 
 
@@ -413,7 +535,7 @@ def _add_ribbon_meta_controls(module: Dict[str, Any], proxy_map: Dict[str, Dict[
             _make_control(
                 name=f"{module['module_name']}_Meta_{idx}_CTRL",
                 role="ribbon_meta",
-                shape="Sphere",
+                shape=_module_shape(settings, "Sphere"),
                 scale=settings.get("ctrl_scale", [1.0, 1.0, 1.0]),
                 position=_vec_lerp(start_pos, end_pos, alpha),
                 rotation=_vec_lerp(start_rot, end_rot, alpha),
@@ -446,9 +568,115 @@ def _add_point_target_controls(module: Dict[str, Any], existing_controls: List[D
                     "target_node": target,
                     "influence": influence,
                     "constrain_type": settings.get("constrain_type"),
+                    "effect_targets": bool(settings.get("effect_targets", False)),
+                    "maintain_offset": bool(settings.get("maintain_offset", True)),
                 },
             )
         )
+    return output
+
+
+def _find_proxy_by_name_pattern(proxy_map: Dict[str, Dict[str, Any]], pattern: str) -> Optional[Dict[str, Any]]:
+    for name, proxy in proxy_map.items():
+        if re.match(pattern, name):
+            return proxy
+    return None
+
+
+def _add_hand_digit_driver_controls(module: Dict[str, Any], proxy_map: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    settings = module.get("module_settings", {})
+    finger_count = int(settings.get("number_of_fingers") or 0)
+    finger_joint_count = int(settings.get("number_of_finger_joints") or 0)
+    thumb_joint_count = int(settings.get("number_of_thumb_joints") or 0)
+    if finger_count <= 0 and thumb_joint_count <= 0:
+        return []
+
+    output = []
+    base_scale = _vec(settings.get("ctrl_scale"), [1.0, 1.0, 1.0])
+    global_parent = f"{module['module_name']}_Global_CTRL" if "Global" in proxy_map else None
+
+    for finger_idx in range(max(finger_count, 0)):
+        root_proxy = proxy_map.get(f"Finger{finger_idx}_0")
+        if root_proxy is None:
+            root_proxy = _find_proxy_by_name_pattern(proxy_map, rf"Finger{finger_idx}_\d+")
+        if root_proxy is None:
+            continue
+
+        curl_name = f"{module['module_name']}_Finger{finger_idx}_Curl_CTRL"
+        output.append(
+            _make_control(
+                name=curl_name,
+                role="hand_finger_curl",
+                shape=_module_shape(settings, "Square"),
+                scale=_vec_scale(base_scale, 0.7),
+                position=root_proxy.get("position", [0.0, 0.0, 0.0]),
+                rotation=root_proxy.get("rotation", [0.0, 0.0, 0.0]),
+                parent_control=global_parent,
+                driven_proxy=root_proxy.get("name"),
+                metadata={"finger_index": finger_idx, "joint_count": finger_joint_count},
+            )
+        )
+        parent = curl_name
+        for joint_idx in range(max(finger_joint_count, 0)):
+            joint_proxy_name = f"Finger{finger_idx}_{joint_idx}"
+            joint_proxy = proxy_map.get(joint_proxy_name)
+            if not joint_proxy:
+                continue
+            driver_name = f"{module['module_name']}_{joint_proxy_name}_Driver_CTRL"
+            output.append(
+                _make_control(
+                    name=driver_name,
+                    role="hand_finger_driver",
+                    shape=_module_shape(settings, "Circle"),
+                    scale=_vec_scale(base_scale, 0.55),
+                    position=joint_proxy.get("position", [0.0, 0.0, 0.0]),
+                    rotation=joint_proxy.get("rotation", [0.0, 0.0, 0.0]),
+                    parent_control=parent,
+                    driven_proxy=joint_proxy_name,
+                    metadata={"finger_index": finger_idx, "joint_index": joint_idx},
+                )
+            )
+            parent = driver_name
+
+    if thumb_joint_count > 0:
+        thumb_root = proxy_map.get("Thumb_0")
+        if thumb_root:
+            curl_name = f"{module['module_name']}_Thumb_Curl_CTRL"
+            output.append(
+                _make_control(
+                    name=curl_name,
+                    role="hand_thumb_curl",
+                    shape=_module_shape(settings, "Square"),
+                    scale=_vec_scale(base_scale, 0.7),
+                    position=thumb_root.get("position", [0.0, 0.0, 0.0]),
+                    rotation=thumb_root.get("rotation", [0.0, 0.0, 0.0]),
+                    parent_control=global_parent,
+                    driven_proxy="Thumb_0",
+                    metadata={"joint_count": thumb_joint_count},
+                )
+            )
+            parent = curl_name
+            for joint_idx in range(thumb_joint_count):
+                thumb_proxy_name = f"Thumb_{joint_idx}"
+                thumb_proxy = proxy_map.get(thumb_proxy_name)
+                if not thumb_proxy:
+                    continue
+                driver_name = f"{module['module_name']}_{thumb_proxy_name}_Driver_CTRL"
+                output.append(
+                    _make_control(
+                        name=driver_name,
+                        role="hand_thumb_driver",
+                        shape=_module_shape(settings, "Circle"),
+                        scale=_vec_scale(base_scale, 0.55),
+                        position=thumb_proxy.get("position", [0.0, 0.0, 0.0]),
+                        rotation=thumb_proxy.get("rotation", [0.0, 0.0, 0.0]),
+                        parent_control=parent,
+                        driven_proxy=thumb_proxy_name,
+                        metadata={"joint_index": joint_idx},
+                    )
+                )
+                parent = driver_name
+
     return output
 
 
@@ -464,12 +692,200 @@ def _add_hand_meta_controls(module: Dict[str, Any], proxy_map: Dict[str, Dict[st
             _make_control(
                 name=f"{module['module_name']}_{proxy_name}_Meta_CTRL",
                 role="metacarpal",
-                shape="Square",
+                shape=_module_shape(settings, "Square"),
                 scale=_vec_scale(_vec(settings.get("ctrl_scale"), [1.0, 1.0, 1.0]), 0.8),
                 position=proxy_data.get("position", [0.0, 0.0, 0.0]),
                 rotation=proxy_data.get("rotation", [0.0, 0.0, 0.0]),
                 parent_proxy=proxy_data.get("parent"),
                 driven_proxy=proxy_name,
+            )
+        )
+    return output
+
+
+def _add_lips_segment_controls(module: Dict[str, Any], proxy_map: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    settings = module.get("module_settings", {})
+    segment_count = int(settings.get("lip_segments") or 0)
+    if segment_count <= 0:
+        return []
+
+    mouth = proxy_map.get("Mouth")
+    left_corner = _find_proxy_by_name_pattern(proxy_map, r"L_Corner.*")
+    right_corner = _find_proxy_by_name_pattern(proxy_map, r"R_Corner.*")
+    upper_center = _find_proxy_by_name_pattern(proxy_map, r"M_Up.*")
+    lower_center = _find_proxy_by_name_pattern(proxy_map, r"M_Lo.*")
+    if not mouth or not left_corner or not right_corner:
+        return []
+
+    left_pos = _vec(left_corner.get("position"))
+    right_pos = _vec(right_corner.get("position"))
+    line_mid = _vec_lerp(left_pos, right_pos, 0.5)
+    up_offset = _vec_sub(_vec(upper_center.get("position")), line_mid) if upper_center else [0.0, 0.25, 0.0]
+    lo_offset = _vec_sub(_vec(lower_center.get("position")), line_mid) if lower_center else [0.0, -0.25, 0.0]
+    mouth_pos = _vec(mouth.get("position"))
+    base_scale = _vec(settings.get("ctrl_scale"), [1.0, 1.0, 1.0])
+
+    output = []
+    for idx in range(segment_count):
+        alpha = float(idx + 1) / float(segment_count + 1)
+        base = _vec_lerp(left_pos, right_pos, alpha)
+        output.append(
+            _make_control(
+                name=f"{module['module_name']}_UpperSegment_{idx}_CTRL",
+                role="lip_segment_upper",
+                shape=_module_shape(settings, "Circle"),
+                scale=_vec_scale(base_scale, 0.7),
+                position=_vec_add(base, up_offset),
+                rotation=[0.0, 0.0, 0.0],
+                metadata={"segment_index": idx},
+            )
+        )
+        output.append(
+            _make_control(
+                name=f"{module['module_name']}_LowerSegment_{idx}_CTRL",
+                role="lip_segment_lower",
+                shape=_module_shape(settings, "Circle"),
+                scale=_vec_scale(base_scale, 0.7),
+                position=_vec_add(base, lo_offset),
+                rotation=[0.0, 0.0, 0.0],
+                metadata={"segment_index": idx},
+            )
+        )
+
+    jaw_target = settings.get("jaw_target")
+    if jaw_target:
+        output.append(
+            _make_control(
+                name=f"{module['module_name']}_JawFollow_CTRL",
+                role="lip_jaw_follow",
+                shape=_module_shape(settings, "Square"),
+                scale=_vec_scale(base_scale, 0.9),
+                position=mouth_pos,
+                rotation=[0.0, 0.0, 0.0],
+                driven_proxy="Mouth",
+                metadata={"jaw_target": jaw_target},
+            )
+        )
+    return output
+
+
+def _add_follicle_eye_segment_controls(module: Dict[str, Any], proxy_map: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    settings = module.get("module_settings", {})
+    segment_count = int(settings.get("lid_segments") or 0)
+    if segment_count <= 0:
+        return []
+
+    eye_center = proxy_map.get("Eyeball")
+    inner = proxy_map.get("In")
+    outer = proxy_map.get("Out")
+    upper = proxy_map.get("Up")
+    lower = proxy_map.get("Lo")
+    if not eye_center or not inner or not outer:
+        return []
+
+    inner_pos = _vec(inner.get("position"))
+    outer_pos = _vec(outer.get("position"))
+    line_mid = _vec_lerp(inner_pos, outer_pos, 0.5)
+    upper_offset = _vec_sub(_vec(upper.get("position")), line_mid) if upper else [0.0, 0.2, 0.0]
+    lower_offset = _vec_sub(_vec(lower.get("position")), line_mid) if lower else [0.0, -0.2, 0.0]
+    base_scale = _vec(settings.get("ctrl_scale"), [1.0, 1.0, 1.0])
+
+    output = []
+    for idx in range(segment_count):
+        alpha = float(idx + 1) / float(segment_count + 1)
+        base = _vec_lerp(inner_pos, outer_pos, alpha)
+        output.append(
+            _make_control(
+                name=f"{module['module_name']}_LidUpperSegment_{idx}_CTRL",
+                role="lid_segment_upper",
+                shape=_module_shape(settings, "Circle"),
+                scale=_vec_scale(base_scale, 0.65),
+                position=_vec_add(base, upper_offset),
+                rotation=[0.0, 0.0, 0.0],
+                metadata={"segment_index": idx},
+            )
+        )
+        output.append(
+            _make_control(
+                name=f"{module['module_name']}_LidLowerSegment_{idx}_CTRL",
+                role="lid_segment_lower",
+                shape=_module_shape(settings, "Circle"),
+                scale=_vec_scale(base_scale, 0.65),
+                position=_vec_add(base, lower_offset),
+                rotation=[0.0, 0.0, 0.0],
+                metadata={"segment_index": idx},
+            )
+        )
+
+    attachment_target = settings.get("follicle_surface") or settings.get("follicle_mesh")
+    if attachment_target:
+        output.append(
+            _make_control(
+                name=f"{module['module_name']}_LidAttach_CTRL",
+                role="lid_attach",
+                shape=_module_shape(settings, "Square"),
+                scale=_vec_scale(base_scale, 0.8),
+                position=_vec(eye_center.get("position")),
+                rotation=[0.0, 0.0, 0.0],
+                driven_proxy="Eyeball",
+                metadata={"attachment_target": attachment_target},
+            )
+        )
+    if settings.get("eyeball"):
+        eye_pos = _vec(eye_center.get("position"))
+        output.append(
+            _make_control(
+                name=f"{module['module_name']}_EyeballAim_CTRL",
+                role="eyeball_aim",
+                shape=_module_shape(settings, "Circle"),
+                scale=_vec_scale(base_scale, 0.75),
+                position=[eye_pos[0], eye_pos[1], eye_pos[2] + 2.0],
+                rotation=[0.0, 0.0, 0.0],
+                driven_proxy="Eyeball",
+            )
+        )
+    return output
+
+
+def _add_axis_guide_controls(module: Dict[str, Any], proxy_map: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    metadata = module.get("metadata", {})
+    aim_axis = metadata.get("aim_axis")
+    up_axis = metadata.get("up_axis")
+    if not aim_axis and not up_axis:
+        return []
+
+    anchor = proxy_map.get("Root") or proxy_map.get("Start") or proxy_map.get("Mouth") or proxy_map.get("Eyeball")
+    if not anchor and proxy_map:
+        anchor = list(proxy_map.values())[0]
+    if not anchor:
+        return []
+
+    anchor_pos = _vec(anchor.get("position"))
+    output = []
+    if aim_axis:
+        aim_pos = _vec_add(anchor_pos, _vec_scale(_axis_to_vec(aim_axis), 2.0))
+        output.append(
+            _make_control(
+                name=f"{module['module_name']}_AimGuide_CTRL",
+                role="axis_guide_aim",
+                shape="Square",
+                scale=[0.25, 0.25, 0.25],
+                position=aim_pos,
+                rotation=[0.0, 0.0, 0.0],
+                metadata={"axis": aim_axis},
+            )
+        )
+    if up_axis:
+        up_pos = _vec_add(anchor_pos, _vec_scale(_axis_to_vec(up_axis), 2.0))
+        output.append(
+            _make_control(
+                name=f"{module['module_name']}_UpGuide_CTRL",
+                role="axis_guide_up",
+                shape="Square",
+                scale=[0.25, 0.25, 0.25],
+                position=up_pos,
+                rotation=[0.0, 0.0, 0.0],
+                metadata={"axis": up_axis},
             )
         )
     return output
@@ -485,7 +901,7 @@ def _add_face_settings_controls(module: Dict[str, Any], proxy_map: Dict[str, Dic
                 _make_control(
                     name=f"{module['module_name']}_LipSettings_CTRL",
                     role="lip_settings",
-                    shape="Square",
+                    shape=_module_shape(settings, "Square"),
                     scale=_vec_scale(_vec(settings.get("ctrl_scale"), [1.0, 1.0, 1.0]), 1.25),
                     position=mouth.get("position", [0.0, 0.0, 0.0]),
                     rotation=mouth.get("rotation", [0.0, 0.0, 0.0]),
@@ -499,7 +915,7 @@ def _add_face_settings_controls(module: Dict[str, Any], proxy_map: Dict[str, Dic
                 _make_control(
                     name=f"{module['module_name']}_LidSettings_CTRL",
                     role="lid_settings",
-                    shape="Square",
+                    shape=_module_shape(settings, "Square"),
                     scale=_vec_scale(_vec(settings.get("ctrl_scale"), [1.0, 1.0, 1.0]), 1.2),
                     position=eyeball.get("position", [0.0, 0.0, 0.0]),
                     rotation=eyeball.get("rotation", [0.0, 0.0, 0.0]),
@@ -534,10 +950,14 @@ def generate_augmented_controls(module: Dict[str, Any]) -> List[Dict[str, Any]]:
         add_many(_add_hand_offset_controls(module, existing_controls))
     if module_class == "FKSegment":
         add_many(_add_fk_reverse(module, existing_controls))
+    if module_class in {"FK", "FKSegment"}:
+        add_many(_add_segment_driver_controls(module, proxy_map))
     if module_class in {"Limb", "QuadLimb"}:
         pv_ctrl = _infer_limb_pv(module, proxy_map)
         if pv_ctrl:
             add_many([pv_ctrl])
+        add_many(_add_limb_deform_controls(module, proxy_map))
+        add_many(_add_limb_ik_floor_anchor(module, proxy_map))
         add_many(_add_limb_foot_roll(module, proxy_map))
     if module_class == "QuadLimb":
         add_many(_add_quad_limb_auto_roll_controls(module, proxy_map))
@@ -546,9 +966,15 @@ def generate_augmented_controls(module: Dict[str, Any]) -> List[Dict[str, Any]]:
     if module_class == "PointTarget":
         add_many(_add_point_target_controls(module, existing_controls))
     if module_class == "Hand":
+        add_many(_add_hand_digit_driver_controls(module, proxy_map))
         add_many(_add_hand_meta_controls(module, proxy_map))
+    if module_class == "Lips":
+        add_many(_add_lips_segment_controls(module, proxy_map))
+    if module_class == "FollicleEye":
+        add_many(_add_follicle_eye_segment_controls(module, proxy_map))
     if module_class in {"Lips", "FollicleEye"}:
         add_many(_add_face_settings_controls(module, proxy_map))
+    add_many(_add_axis_guide_controls(module, proxy_map))
     return output
 
 

@@ -190,4 +190,4 @@ This script:
 1. Imports your FBX as a skeletal mesh.
 2. Creates a new Control Rig asset.
 3. Builds module/proxy bones and translated controls (with control transform placement and parent relationships).
-4. Materializes module settings into additional Control Rig controls (for example: FK offsets/reverse controls, limb pole-vector + foot-roll controls, ribbon meta controls, and point-target reference controls).
+4. Materializes module settings into additional Control Rig controls (for example: FK offsets/reverse + segment drivers, limb pole-vector + deform chain + IK floor + foot-roll controls, quad-limb auto-roll controls, hand offset/digit/meta controls, ribbon meta controls, point-target reference controls, and lips/eye segment + follow/attachment controls).
