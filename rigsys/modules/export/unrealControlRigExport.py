@@ -791,6 +791,10 @@ _RIGSYS_SOLVE_EVENTS_SEEDED = False
 ENABLE_UNRESOLVED_LINK_WARNINGS = False
 _PIN_EXISTS_CACHE = {}
 _MISSING_STRUCT_PATHS_CACHE = {}
+_SCENE_TRANSFORM_GET_CACHE = {}
+_SCENE_TRANSFORM_SET_CACHE = {}
+_SCENE_VISIBILITY_SET_CACHE = {}
+_SCENE_EXEC_TAIL_CACHE = {}
 
 
 def _log_warning(message):
@@ -1356,6 +1360,7 @@ def _apply_rigvm_instructions(control_rig_bp, manifest):
     _ensure_solve_event_nodes(controller)
 
     pin_map = {}
+    _seed_manifest_variable_getters(controller, manifest, pin_map)
     for index, instruction in enumerate(instructions):
         if _apply_single_rigvm_instruction(controller, instruction, index, pin_map):
             continue
@@ -2149,6 +2154,139 @@ def _register_pin_mapping(pin_map, maya_pin, rigvm_pin):
         pin_map[node] = rigvm_pin
 
 
+def _sanitize_name(value):
+    """Normalize names used for generated graph nodes/variables."""
+    text = str(value or "")
+    return text.replace(":", "_").replace("|", "_").replace(".", "_").replace(" ", "_")
+
+
+def _custom_attr_unreal_type(maya_type):
+    """Map exported Maya attr types to Unreal member variable types."""
+    type_map = {
+        "bool": "bool",
+        "long": "int32",
+        "short": "int32",
+        "byte": "int32",
+        "enum": "int32",
+        "float": "float",
+        "double": "float",
+        "doubleAngle": "float",
+        "doubleLinear": "float",
+        "string": "string",
+    }
+    return type_map.get(maya_type)
+
+
+def _resolve_variable_output_pin(controller, node_path):
+    """Resolve a likely output pin from a variable getter node."""
+    candidates = [
+        f"{node_path}.Value",
+        f"{node_path}.Result",
+        f"{node_path}.Out",
+        f"{node_path}.Output",
+        f"{node_path}.Variable",
+    ]
+    for candidate in candidates:
+        if _pin_exists(controller, candidate):
+            return candidate
+    return candidates[0]
+
+
+def _try_add_variable_getter_node(controller, variable_name, variable_type, position, node_name):
+    """Try to add a variable getter node and return its node path/handle."""
+    if not hasattr(controller, "add_variable_node"):
+        return None
+
+    candidates = [
+        ((variable_name, variable_type, True, "", position, node_name, False, False), {}),
+        ((variable_name, variable_type, True, "", position, node_name, False), {}),
+        ((variable_name, variable_type, True, "", position, node_name), {}),
+        ((variable_name, variable_type, True, "", position), {}),
+        ((variable_name, variable_type, True, position, node_name, False, False), {}),
+        ((variable_name, variable_type, True, position, node_name, False), {}),
+        ((variable_name, variable_type, True, position, node_name), {}),
+        ((variable_name, variable_type, True, position), {}),
+        ((variable_name, True, position, node_name, False, False), {}),
+        ((variable_name, True, position, node_name, False), {}),
+        ((variable_name, True, position, node_name), {}),
+        ((variable_name, True, position), {}),
+    ]
+    for args, kwargs in candidates:
+        try:
+            node_handle = controller.add_variable_node(*args, **kwargs)
+            return node_handle or node_name
+        except TypeError:
+            continue
+        except Exception:
+            break
+    return None
+
+
+def _seed_manifest_variable_getters(controller, manifest, pin_map):
+    """Seed pin map with variable getter nodes for exported custom attrs/switches."""
+    variable_node_cache = {}
+    row = 0
+
+    def _register_variable_pin(maya_plug, variable_name, variable_type):
+        nonlocal row
+        cache_key = (variable_name, variable_type)
+        node_path = variable_node_cache.get(cache_key)
+        if node_path is None:
+            node_name = f"RigSys_Var_{_sanitize_name(variable_name)}"
+            position = unreal.Vector2D(-460.0, 180.0 + float(row) * 80.0)
+            row += 1
+            node_handle = _try_add_variable_getter_node(
+                controller=controller,
+                variable_name=variable_name,
+                variable_type=variable_type,
+                position=position,
+                node_name=node_name,
+            )
+            if node_handle is None:
+                return
+            node_path = _resolve_node_path(node_handle, node_name)
+            variable_node_cache[cache_key] = node_path
+
+        output_pin = _resolve_variable_output_pin(controller, node_path)
+        _register_pin_mapping(pin_map, maya_plug, output_pin)
+
+    for attr in manifest.get("custom_control_attributes", []):
+        control = attr.get("control")
+        attribute = attr.get("attribute")
+        if not control or not attribute:
+            continue
+        maya_plug = f"{control}.{attribute}"
+        variable_name = _sanitize_name(f"{control}__{attribute}")
+        variable_type = _custom_attr_unreal_type(attr.get("type")) or "float"
+        _register_variable_pin(maya_plug, variable_name, variable_type)
+
+    for system in manifest.get("ik_fk_systems", []):
+        switch_attribute = system.get("switch_attribute")
+        if not switch_attribute:
+            continue
+        variable_name = _sanitize_name(f"IKFK__{switch_attribute}")
+        _register_variable_pin(switch_attribute, variable_name, "float")
+
+    for logic_node in manifest.get("rig_logic_nodes", []):
+        node_name = logic_node.get("name")
+        values = logic_node.get("values") or {}
+        if not node_name:
+            continue
+        for attr_name, value in values.items():
+            if not isinstance(value, (int, float, bool, str)):
+                continue
+            maya_plug = f"{node_name}.{attr_name}"
+            variable_name = _sanitize_name(f"Logic__{node_name}__{attr_name}")
+            variable_type = "float"
+            if isinstance(value, bool):
+                variable_type = "bool"
+            elif isinstance(value, int):
+                variable_type = "int32"
+            elif isinstance(value, str):
+                variable_type = "string"
+            _register_variable_pin(maya_plug, variable_name, variable_type)
+
+
 def _controller_has_link(controller, source_pin, target_pin):
     """Check whether a controller already has a link between pins."""
     if not hasattr(controller, "find_link"):
@@ -2452,13 +2590,281 @@ def _resolve_node_path(node_handle, fallback_name):
     return fallback_name
 
 
+def _scene_plug_parts(pin_path):
+    """Return (node, attr) for Maya-like scene plugs."""
+    if not isinstance(pin_path, str) or "." not in pin_path:
+        return None, None
+    node_name, attr_name = pin_path.split(".", 1)
+    if not node_name or not attr_name:
+        return None, None
+    if node_name.startswith(("RigSys_", "/Script/", "Hierarchy::")):
+        return None, None
+    if "::" in node_name or "/" in node_name:
+        return None, None
+    return node_name, attr_name
+
+
+def _scene_attr_kind(attr_name):
+    """Classify Maya attr names for scene-plug bridge nodes."""
+    attr = str(attr_name or "")
+    lower = attr.lower()
+    if lower in {"translation", "translate"} or lower.startswith("translate"):
+        return "translation"
+    if lower in {"rotation", "rotate"} or lower.startswith("rotate"):
+        return "rotation"
+    if lower in {"scale", "scale3d"} or lower.startswith("scale"):
+        return "scale"
+    if lower == "visibility":
+        return "visibility"
+    return None
+
+
+def _wire_execute_to_mutable_unit(controller, node_path):
+    """Try to chain mutable units from forward solve execute flow."""
+    if not hasattr(controller, "add_link"):
+        return
+
+    cache_key = id(controller)
+    current_tail = _SCENE_EXEC_TAIL_CACHE.get(cache_key)
+    if current_tail is None:
+        for candidate in (
+            "RigSys_ForwardSolve.ExecuteContext",
+            "RigSys_ForwardSolve.Execute",
+            "RigSys_ForwardSolve.Result",
+        ):
+            if _pin_exists(controller, candidate):
+                current_tail = candidate
+                break
+    if current_tail is None:
+        return
+
+    execute_pin = None
+    for candidate in (
+        f"{node_path}.ExecuteContext",
+        f"{node_path}.Execute",
+        f"{node_path}.Context",
+    ):
+        if _pin_exists(controller, candidate):
+            execute_pin = candidate
+            break
+    if execute_pin is None:
+        return
+
+    _try_call(
+        controller.add_link,
+        [
+            ((current_tail, execute_pin), {}),
+            ((current_tail, execute_pin, False), {}),
+        ],
+        log_exceptions=False,
+    )
+
+    for candidate in (
+        f"{node_path}.ExecuteContext",
+        f"{node_path}.Execute",
+        f"{node_path}.Completed",
+        f"{node_path}.Result",
+    ):
+        if _pin_exists(controller, candidate):
+            _SCENE_EXEC_TAIL_CACHE[cache_key] = candidate
+            return
+    _SCENE_EXEC_TAIL_CACHE[cache_key] = current_tail
+
+
+def _ensure_scene_get_transform_node(controller, node_name):
+    """Create/get a RigUnit node that exposes scene-node transform outputs."""
+    cache_key = (id(controller), node_name)
+    if cache_key in _SCENE_TRANSFORM_GET_CACHE:
+        return _SCENE_TRANSFORM_GET_CACHE[cache_key]
+
+    safe_name = _sanitize_name(node_name)
+    created_count = len(_SCENE_TRANSFORM_GET_CACHE)
+    node_name_hint = f"RigSys_GetTransform_{safe_name}"
+    position = unreal.Vector2D(-980.0, 420.0 + float(created_count) * 80.0)
+    node_handle = _try_add_unit_node(
+        controller=controller,
+        struct_paths=[
+            "/Script/ControlRig.RigUnit_GetTransform",
+            "/Script/ControlRig.RigUnit_GetTransformByItem",
+            "/Script/ControlRig.RigUnit_GetTransformItemSpace",
+        ],
+        position=position,
+        node_name=node_name_hint,
+    )
+    if node_handle is None:
+        _SCENE_TRANSFORM_GET_CACHE[cache_key] = None
+        return None
+
+    node_path = _resolve_node_path(node_handle, node_name_hint)
+    _set_first_supported_pin_default(
+        controller,
+        node_path,
+        ["Item", "Item.Name", "ItemName", "Bone", "Name", "Control"],
+        node_name,
+    )
+    _SCENE_TRANSFORM_GET_CACHE[cache_key] = node_path
+    return node_path
+
+
+def _ensure_scene_set_transform_node(controller, node_name):
+    """Create/get a RigUnit node that can drive scene-node transforms."""
+    cache_key = (id(controller), node_name)
+    if cache_key in _SCENE_TRANSFORM_SET_CACHE:
+        return _SCENE_TRANSFORM_SET_CACHE[cache_key]
+
+    safe_name = _sanitize_name(node_name)
+    created_count = len(_SCENE_TRANSFORM_SET_CACHE)
+    node_name_hint = f"RigSys_SetTransform_{safe_name}"
+    position = unreal.Vector2D(1820.0, 420.0 + float(created_count) * 80.0)
+    node_handle = _try_add_unit_node(
+        controller=controller,
+        struct_paths=[
+            "/Script/ControlRig.RigUnit_SetTransform",
+            "/Script/ControlRig.RigUnit_SetTransformByItem",
+        ],
+        position=position,
+        node_name=node_name_hint,
+    )
+    if node_handle is None:
+        _SCENE_TRANSFORM_SET_CACHE[cache_key] = None
+        return None
+
+    node_path = _resolve_node_path(node_handle, node_name_hint)
+    _set_first_supported_pin_default(
+        controller,
+        node_path,
+        ["Item", "Item.Name", "ItemName", "Bone", "Name", "Control"],
+        node_name,
+    )
+    _set_first_supported_pin_default(
+        controller,
+        node_path,
+        ["Weight", "Alpha"],
+        1.0,
+    )
+    _wire_execute_to_mutable_unit(controller, node_path)
+    _SCENE_TRANSFORM_SET_CACHE[cache_key] = node_path
+    return node_path
+
+
+def _ensure_scene_set_visibility_node(controller, node_name):
+    """Create/get a RigUnit node that can drive scene-node visibility."""
+    cache_key = (id(controller), node_name)
+    if cache_key in _SCENE_VISIBILITY_SET_CACHE:
+        return _SCENE_VISIBILITY_SET_CACHE[cache_key]
+
+    safe_name = _sanitize_name(node_name)
+    created_count = len(_SCENE_VISIBILITY_SET_CACHE)
+    node_name_hint = f"RigSys_SetVisibility_{safe_name}"
+    position = unreal.Vector2D(1820.0, 980.0 + float(created_count) * 60.0)
+    node_handle = _try_add_unit_node(
+        controller=controller,
+        struct_paths=[
+            "/Script/ControlRig.RigUnit_SetControlVisibility",
+            "/Script/ControlRig.RigUnit_SetVisibility",
+        ],
+        position=position,
+        node_name=node_name_hint,
+    )
+    if node_handle is None:
+        _SCENE_VISIBILITY_SET_CACHE[cache_key] = None
+        return None
+
+    node_path = _resolve_node_path(node_handle, node_name_hint)
+    _set_first_supported_pin_default(
+        controller,
+        node_path,
+        ["Control", "Item", "Item.Name", "ItemName", "Name"],
+        node_name,
+    )
+    _wire_execute_to_mutable_unit(controller, node_path)
+    _SCENE_VISIBILITY_SET_CACHE[cache_key] = node_path
+    return node_path
+
+
+def _resolve_scene_pin_bridge(controller, pin_path, is_source):
+    """Resolve Maya scene plugs through generated RigUnit bridge nodes."""
+    node_name, attr_name = _scene_plug_parts(pin_path)
+    if not node_name:
+        return pin_path
+
+    kind = _scene_attr_kind(attr_name)
+    if kind in {"translation", "rotation", "scale"}:
+        if is_source:
+            node_path = _ensure_scene_get_transform_node(controller, node_name)
+            if node_path is None:
+                return pin_path
+            candidates = {
+                "translation": [
+                    f"{node_path}.Transform.Translation",
+                    f"{node_path}.Translation",
+                    f"{node_path}.Result.Translation",
+                ],
+                "rotation": [
+                    f"{node_path}.Transform.Rotation",
+                    f"{node_path}.Rotation",
+                    f"{node_path}.Result.Rotation",
+                ],
+                "scale": [
+                    f"{node_path}.Transform.Scale3D",
+                    f"{node_path}.Scale",
+                    f"{node_path}.Result.Scale3D",
+                ],
+            }.get(kind, [])
+            for candidate in candidates:
+                if _pin_exists(controller, candidate):
+                    return candidate
+            return candidates[0] if candidates else pin_path
+
+        node_path = _ensure_scene_set_transform_node(controller, node_name)
+        if node_path is None:
+            return pin_path
+        candidates = {
+            "translation": [
+                f"{node_path}.Transform.Translation",
+                f"{node_path}.Translation",
+                f"{node_path}.Value.Translation",
+            ],
+            "rotation": [
+                f"{node_path}.Transform.Rotation",
+                f"{node_path}.Rotation",
+                f"{node_path}.Value.Rotation",
+            ],
+            "scale": [
+                f"{node_path}.Transform.Scale3D",
+                f"{node_path}.Scale",
+                f"{node_path}.Value.Scale3D",
+            ],
+        }.get(kind, [])
+        for candidate in candidates:
+            if _pin_exists(controller, candidate):
+                return candidate
+        return candidates[0] if candidates else pin_path
+
+    if kind == "visibility" and not is_source:
+        node_path = _ensure_scene_set_visibility_node(controller, node_name)
+        if node_path is None:
+            return pin_path
+        for candidate in (
+            f"{node_path}.Visible",
+            f"{node_path}.bVisible",
+            f"{node_path}.IsVisible",
+            f"{node_path}.Value",
+        ):
+            if _pin_exists(controller, candidate):
+                return candidate
+    return pin_path
+
+
 def _add_link_if_possible(controller, source_pin, target_pin):
     """Create a RigVM link if controller supports it."""
     if not source_pin or not target_pin:
         return False
-    if source_pin == target_pin:
+    source_pin = _resolve_scene_pin_bridge(controller, source_pin, True)
+    target_pin = _resolve_scene_pin_bridge(controller, target_pin, False)
+    if not source_pin or not target_pin:
         return False
-    if _is_unresolved_scene_plug(source_pin) or _is_unresolved_scene_plug(target_pin):
+    if source_pin == target_pin:
         return False
     if not _pin_exists(controller, source_pin) or not _pin_exists(controller, target_pin):
         return False
