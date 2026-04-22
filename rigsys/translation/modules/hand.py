@@ -14,10 +14,6 @@ class HandTranslator(GenericTranslator):
     module_type = "Hand"
 
     def build_controls(self, module: Any, proxy_lookup: Dict[str, Any]) -> List[ControlDefinition]:
-        if getattr(module, "addOffset", False):
-            self._last_warnings.append(
-                "Hand addOffset behavior is exported as metadata; additional offset controls are not expanded."
-            )
         controls = super().build_controls(module, proxy_lookup)
         for control in controls:
             proxy_name = control.driven_proxy or ""
