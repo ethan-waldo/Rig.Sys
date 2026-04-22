@@ -493,7 +493,8 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
             ],
         }
 
-        plan = build_behavior_graph_plan(payload)
+        materialized = augment_payload_with_generated_controls(payload)
+        plan = build_behavior_graph_plan(materialized)
 
         self.assertGreater(len(plan.get("nodes", [])), 0)
         self.assertGreater(len(plan.get("links", [])), 0)
@@ -544,6 +545,135 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         limb_model = next(model for model in plan["math_models"] if model.get("module_class") == "Limb")
         self.assertTrue(any(eq.get("id") == "ik_fk_rotation_blend" for eq in limb_model.get("equations", [])))
         point_model = next(model for model in plan["math_models"] if model.get("module_class") == "PointTarget")
-        self.assertEqual(point_model.get("implementation_status"), "approximate")
-        self.assertTrue(any("maintain_offset" in gap for gap in point_model.get("approximation_gaps", [])))
+        self.assertEqual(point_model.get("implementation_status"), "implemented")
+        self.assertFalse(any("maintain_offset" in gap for gap in point_model.get("approximation_gaps", [])))
+
+    def test_graph_plan_point_target_maintain_offset_and_aim_math_nodes(self):
+        payload = {
+            "rig_name": "GraphRig",
+            "modules": [
+                {
+                    "module_name": "M_Target",
+                    "module_class": "PointTarget",
+                    "proxies": [{"name": "Point", "parent": None, "position": [0, 0, 0], "rotation": [0, 0, 0]}],
+                    "controls": [
+                        {
+                            "name": "M_Target_Point_CTRL",
+                            "role": "point_target",
+                            "shape": "sphere",
+                            "scale": [1, 1, 1],
+                            "position": [0, 0, 0],
+                            "rotation": [0, 0, 0],
+                            "driven_proxy": "Point",
+                            "parent_proxy": None,
+                        },
+                        {
+                            "name": "M_Target_Target_0_CTRL",
+                            "role": "point_target_reference",
+                            "shape": "circle",
+                            "scale": [1, 1, 1],
+                            "position": [0, 0, 0],
+                            "rotation": [0, 0, 0],
+                            "driven_proxy": None,
+                            "parent_proxy": None,
+                            "metadata": {"target_node": "A", "influence": 1.0},
+                        },
+                    ],
+                    "metadata": {
+                        "aim_axis": "+x",
+                        "up_axis": "-z",
+                    },
+                    "module_settings": {
+                        "targets": ["A"],
+                        "targets_influence": [1.0],
+                        "constrain_type": "aim",
+                        "effect_targets": True,
+                        "maintain_offset": True,
+                    },
+                }
+            ],
+        }
+        materialized = augment_payload_with_generated_controls(payload)
+        plan = build_behavior_graph_plan(materialized)
+        point_module = plan["modules"][0]
+        node_structs = [node["struct_path"] for node in point_module["nodes"]]
+        node_names = [node["name"] for node in point_module["nodes"]]
+
+        self.assertTrue(any("MathVectorSub" in path for path in node_structs))
+        self.assertTrue(any("MathVectorAdd" in path for path in node_structs))
+        self.assertTrue(any("AimBone" in path for path in node_structs))
+        self.assertTrue(any("_Offset_" in name for name in node_names))
+        self.assertTrue(any(link.get("stage") == "construction" for link in point_module["links"]))
+        self.assertTrue(
+            any(
+                pin_default.get("pin_path", "").endswith(".PrimaryAxis")
+                and "(X=1.0" in pin_default.get("value", "")
+                for pin_default in point_module["pin_defaults"]
+            )
+        )
+
+        point_model = next(model for model in plan["math_models"] if model.get("module_class") == "PointTarget")
+        self.assertEqual(point_model.get("implementation_status"), "implemented")
+        self.assertFalse(any("maintain_offset" in gap for gap in point_model.get("approximation_gaps", [])))
+        self.assertFalse(any("aim axis" in gap for gap in point_model.get("approximation_gaps", [])))
+
+    def test_graph_plan_hand_generates_operator_network_nodes(self):
+        payload = {
+            "rig_name": "GraphRig",
+            "modules": [
+                {
+                    "module_name": "L_Hand",
+                    "module_class": "Hand",
+                    "proxies": [
+                        {"name": "Root", "parent": None, "position": [0, 0, 0], "rotation": [0, 0, 0]},
+                        {"name": "Global", "parent": "Root", "position": [0, 0, 0], "rotation": [0, 0, 0]},
+                        {"name": "Finger0_0", "parent": "Root", "position": [1, 0, 0], "rotation": [0, 0, 0]},
+                    ],
+                    "controls": [
+                        {
+                            "name": "L_Hand_Global_CTRL",
+                            "role": "hand_global",
+                            "shape": "sphere",
+                            "scale": [1, 1, 1],
+                            "position": [0, 0, 0],
+                            "rotation": [0, 0, 0],
+                            "driven_proxy": "Global",
+                            "parent_proxy": "Root",
+                        },
+                        {
+                            "name": "L_Hand_Finger0_0_CTRL",
+                            "role": "finger",
+                            "shape": "circle",
+                            "scale": [1, 1, 1],
+                            "position": [1, 0, 0],
+                            "rotation": [0, 0, 0],
+                            "driven_proxy": "Finger0_0",
+                            "parent_proxy": "Root",
+                        },
+                    ],
+                    "metadata": {
+                        "aim_axis": "+x",
+                        "up_axis": "-z",
+                    },
+                    "module_settings": {
+                        "add_offset": True,
+                    },
+                }
+            ],
+        }
+        materialized = augment_payload_with_generated_controls(payload)
+        plan = build_behavior_graph_plan(materialized)
+        hand_module = plan["modules"][0]
+        node_structs = [node["struct_path"] for node in hand_module["nodes"]]
+
+        self.assertTrue(any("MathDoubleMul" in path for path in node_structs))
+        self.assertTrue(any("MathDoubleAdd" in path for path in node_structs))
+        self.assertTrue(any("MathDoubleNegate" in path for path in node_structs))
+        self.assertTrue(any("SetRotation" in path for path in node_structs))
+        self.assertTrue(any("SetTranslation" in path for path in node_structs))
+        self.assertTrue(any(link.get("stage") == "forward" for link in hand_module["links"]))
+
+        hand_model = next(model for model in plan["math_models"] if model.get("module_class") == "Hand")
+        self.assertEqual(hand_model.get("implementation_status"), "implemented")
+        self.assertFalse(any("multiplyDivide" in gap for gap in hand_model.get("approximation_gaps", [])))
 

@@ -81,6 +81,11 @@ def _axis_to_vec(axis: Optional[str]) -> List[float]:
     return [0.0, 0.0, 0.0]
 
 
+def _vec_pin_literal(values: Iterable[float]) -> str:
+    x, y, z = _vec(values, [0.0, 0.0, 0.0])
+    return f"(X={x},Y={y},Z={z})"
+
+
 def _module_shape(settings: Dict[str, Any], fallback: str = "Circle") -> str:
     shape = settings.get("ctrl_shape")
     if shape is None:
@@ -1326,6 +1331,192 @@ def _point_target_channel_bindings(module: Dict[str, Any], bindings: List[Dict[s
     return output
 
 
+def _point_target_operator_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    settings = module.get("module_settings", {})
+    metadata = module.get("metadata", {}) or {}
+    constrain_type = str(settings.get("constrain_type") or "point").lower()
+    control_lookup = {control.get("name"): control for control in module.get("controls", []) if control.get("name")}
+    target_lookup = {}
+    for control in module.get("controls", []):
+        if control.get("role") != "point_target_reference":
+            continue
+        target_node = str((control.get("metadata") or {}).get("target_node") or "")
+        if target_node:
+            target_lookup[target_node] = control
+
+    aim_axis_vector = _axis_to_vec(settings.get("aim_axis") or metadata.get("aim_axis"))
+    up_axis_vector = _axis_to_vec(settings.get("up_axis") or metadata.get("up_axis"))
+    aim_axis_sign = next((component for component in aim_axis_vector if abs(component) > 1e-6), 1.0)
+    output: List[Dict[str, Any]] = []
+    for binding in bindings:
+        if str(binding.get("tag", "")) != "point_target_constraint":
+            output.append(binding)
+            continue
+
+        data = dict(binding)
+        source_control = control_lookup.get(str(binding.get("source_control", "")), {})
+        reference_control = target_lookup.get(str(binding.get("target_item_name", "")), {})
+        source_position = _vec(source_control.get("position"), [0.0, 0.0, 0.0])
+        reference_position = _vec(reference_control.get("position"), [0.0, 0.0, 0.0])
+        data["offset_vector"] = _vec_sub(reference_position, source_position)
+        if bool(binding.get("maintain_offset", False)):
+            data["use_offset_buffer"] = True
+            data["math_mode"] = f"{binding.get('math_mode', 'point_target')}_maintain_offset"
+        if constrain_type == "aim":
+            data["use_aim_axis_math"] = True
+            data["aim_axis_vector"] = aim_axis_vector
+            data["up_axis_vector"] = up_axis_vector
+            data["aim_axis_sign"] = float(aim_axis_sign)
+            data["math_mode"] = f"{binding.get('math_mode', 'point_target_aim')}_axis_tighten"
+        output.append(data)
+    return output
+
+
+def _hand_operator_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    settings = module.get("module_settings", {})
+    metadata = module.get("metadata", {}) or {}
+    controls = module.get("controls", [])
+    control_lookup = {control.get("name"): control for control in controls if control.get("name")}
+    global_control = next((control.get("name") for control in controls if control.get("role") == "hand_global"), None)
+    if not global_control:
+        return bindings
+
+    digit_keys = []
+    for control in controls:
+        driven_proxy = str(control.get("driven_proxy") or "")
+        finger_match = re.match(r"Finger(\d+)_", driven_proxy)
+        if finger_match:
+            key = f"Finger{finger_match.group(1)}"
+            if key not in digit_keys:
+                digit_keys.append(key)
+            continue
+        if driven_proxy.startswith("Thumb_") and "Thumb" not in digit_keys:
+            digit_keys.append("Thumb")
+    digit_keys = sorted([key for key in digit_keys if key.startswith("Finger")], key=lambda item: int(item[6:])) + (
+        ["Thumb"] if "Thumb" in digit_keys else []
+    )
+    if not digit_keys:
+        return bindings
+
+    ratio = 1.0 / (len(digit_keys) * 0.5)
+    rate_map: Dict[str, float] = {}
+    rate_value = 0.0
+    for key in digit_keys:
+        rate_map[key] = rate_value
+        rate_value -= ratio
+
+    aim_axis = settings.get("aim_axis") or metadata.get("aim_axis")
+    aim_axis_vector = _axis_to_vec(aim_axis)
+    aim_direction = next((component for component in aim_axis_vector if abs(component) > 1e-6), 1.0)
+    output: List[Dict[str, Any]] = []
+    for binding in bindings:
+        role = str(binding.get("source_role", ""))
+        if role not in {"hand_updn_offset", "hand_twist_offset", "hand_splay_offset"}:
+            output.append(binding)
+            continue
+
+        source_control = control_lookup.get(str(binding.get("source_control", "")), {})
+        driven_proxy = str(source_control.get("driven_proxy") or "")
+        finger_match = re.match(r"Finger(\d+)_", driven_proxy)
+        if finger_match:
+            digit_key = f"Finger{finger_match.group(1)}"
+        elif driven_proxy.startswith("Thumb_"):
+            digit_key = "Thumb"
+        else:
+            generated_from = str((source_control.get("metadata") or {}).get("generated_from") or "")
+            gen_match = re.search(r"Finger(\d+)_", generated_from)
+            if gen_match:
+                digit_key = f"Finger{gen_match.group(1)}"
+            elif "Thumb" in generated_from:
+                digit_key = "Thumb"
+            else:
+                output.append(binding)
+                continue
+
+        rate = float(rate_map.get(digit_key, 0.0))
+        data = dict(binding)
+        data["hand_global_control"] = global_control
+        data["hand_rate"] = rate
+        data["hand_aim_direction"] = float(aim_direction)
+        if role == "hand_updn_offset":
+            data["hand_operator"] = "updn"
+            data["hand_input_channel"] = "rotateZ"
+            data["target_channel"] = "rotation"
+            data["hand_target_axis"] = "Y"
+            data["hand_factor"] = float(1.0 * aim_direction)
+        elif role == "hand_twist_offset":
+            data["hand_operator"] = "twist"
+            data["hand_input_channel"] = "rotateX"
+            data["target_channel"] = "rotation"
+            data["hand_target_axis"] = "Y"
+            data["hand_factor"] = float((1.0 + rate) * -1.0)
+        else:
+            data["hand_operator"] = "splay"
+            data["hand_input_channel"] = "translateX"
+            data["target_channel"] = "translation"
+            data["hand_target_axis"] = "Z"
+            data["hand_factor"] = float(((1.0 + rate) * -1.5) * aim_direction)
+        data["math_mode"] = f"hand_{data['hand_operator']}_multiply_divide"
+        output.append(data)
+    return output
+
+
+def _annotate_point_target_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    metadata = module.get("metadata", {}) or {}
+    aim_axis = str(metadata.get("aim_axis") or "+x")
+    up_axis = str(metadata.get("up_axis") or "-z")
+    output: List[Dict[str, Any]] = []
+    for binding in bindings:
+        if str(binding.get("tag", "")) != "point_target_constraint":
+            output.append(binding)
+            continue
+        data = dict(binding)
+        data["aim_axis"] = aim_axis
+        data["up_axis"] = up_axis
+        output.append(data)
+    return output
+
+
+def _annotate_hand_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if module.get("module_class") != "Hand":
+        return bindings
+    controls = module.get("controls", []) or []
+    finger_roots = sorted(
+        control
+        for control in controls
+        if str(control.get("role", "")).startswith("hand_finger_curl")
+    )
+    thumb_roots = sorted(
+        control
+        for control in controls
+        if str(control.get("role", "")).startswith("hand_thumb_curl")
+    )
+    root_controls = finger_roots + thumb_roots
+    if not root_controls:
+        return bindings
+
+    denominator = max(len(root_controls), 1) * 0.5
+    ratio = 1.0 / denominator if denominator > 0.0 else 1.0
+    rate_lookup: Dict[str, float] = {}
+    rate = 0.0
+    for control in root_controls:
+        control_name = control.get("name")
+        if not control_name:
+            continue
+        rate_lookup[control_name] = rate
+        rate -= ratio
+
+    output: List[Dict[str, Any]] = []
+    for binding in bindings:
+        data = dict(binding)
+        control_name = str(data.get("source_control", ""))
+        if control_name in rate_lookup:
+            data["hand_operator_profile"] = "curl_root"
+            data["hand_rate"] = rate_lookup[control_name]
+        output.append(data)
+    return output
+
+
 def _build_module_math_model(module: Dict[str, Any]) -> Dict[str, Any]:
     module_name = module.get("module_name", "Module")
     module_class = module.get("module_class", "")
@@ -1389,10 +1580,7 @@ def _build_module_math_model(module: Dict[str, Any]) -> Dict[str, Any]:
             ]
         )
         implemented.append("hand_offset_chain_and_digit_driver_controls")
-        approximations.append(
-            "Per-digit multiplyDivide and rate falloff are approximated by staged transform mapping; "
-            "numeric operator graph emission is not yet complete."
-        )
+        implemented.append("hand_multiply_divide_rate_falloff_operator_network")
 
     if module_class == "PointTarget":
         constrain_type = str(settings.get("constrain_type") or "point").lower()
@@ -1405,14 +1593,11 @@ def _build_module_math_model(module: Dict[str, Any]) -> Dict[str, Any]:
         )
         implemented.append("weighted_point_target_binding_generation")
         if constrain_type not in {"parent", ""}:
-            approximations.append(
-                f"Constraint mode '{constrain_type}' uses channel-isolated set units where possible; "
-                "aim axis reconstruction is still approximated."
-            )
+            implemented.append("point_target_channel_isolated_set_units")
+        if constrain_type == "aim":
+            implemented.append("point_target_aim_axis_vector_reconstruction")
         if bool(settings.get("maintain_offset", True)):
-            approximations.append(
-                "maintain_offset is approximated by staged construction initialization rather than exact Maya offset buffers."
-            )
+            implemented.append("point_target_maintain_offset_buffer_reconstruction")
 
     if module_class == "RibbonBindIK":
         equations.append(
@@ -1555,6 +1740,8 @@ def _make_stage_nodes_for_binding(
 
     extra_nodes: List[Dict[str, Any]] = []
     extra_links: List[Dict[str, Any]] = []
+    transform_source_pin = f"{get_node}.Transform"
+
     if stage_name == "forward" and (weight_pin_path or weight_pin_path_candidates):
         weight_node = f"{graph_module_name}_{stage_tag}_Weight_{index}"
         extra_nodes.append(
@@ -1595,6 +1782,142 @@ def _make_stage_nodes_for_binding(
         else:
             extra_links.append({"source": f"{weight_node}.Float", "target": f"{set_node}.Weight", "stage": stage_name})
 
+    if stage_name == "forward" and bool(binding.get("use_offset_buffer")):
+        offset_node = f"{graph_module_name}_{stage_tag}_Offset_{index}"
+        extra_nodes.append(
+            {
+                "name": offset_node,
+                "struct_path": "/Script/RigVM.RigVMFunction_MathVectorAdd",
+                "method_name": "Execute",
+                "position": [base_x + 120.0, stage_y + 120.0],
+            }
+        )
+        offset_vector = binding.get("offset_vector") or [0.0, 0.0, 0.0]
+        _add_pin_default(set_defaults, pin_path=f"{offset_node}.B", value=_vec_pin_literal(offset_vector))
+        extra_links.append({"source": f"{get_node}.Transform.Translation", "target": f"{offset_node}.A", "stage": stage_name})
+        if target_channel == "translation":
+            extra_links.append({"source": f"{offset_node}.Result", "target": f"{set_node}.Value", "stage": stage_name})
+            transform_source_pin = ""
+
+    if stage_name == "forward" and bool(binding.get("use_aim_axis_math")):
+        aim_vector_node = f"{graph_module_name}_{stage_tag}_AimVec_{index}"
+        aim_add_node = f"{graph_module_name}_{stage_tag}_AimOffset_{index}"
+        aim_apply_node = f"{graph_module_name}_{stage_tag}_AimApply_{index}"
+        extra_nodes.extend(
+            [
+                {
+                    "name": aim_vector_node,
+                    "struct_path": "/Script/RigVM.RigVMFunction_MathVectorSub",
+                    "method_name": "Execute",
+                    "position": [base_x + 120.0, stage_y + 160.0],
+                },
+                {
+                    "name": aim_add_node,
+                    "struct_path": "/Script/RigVM.RigVMFunction_MathVectorAdd",
+                    "method_name": "Execute",
+                    "position": [base_x + 300.0, stage_y + 160.0],
+                },
+                {
+                    "name": aim_apply_node,
+                    "struct_path": "/Script/ControlRig.RigUnit_AimBone",
+                    "method_name": "Execute",
+                    "position": [base_x + 500.0, stage_y + 160.0],
+                },
+            ]
+        )
+        _add_pin_default(
+            set_defaults,
+            pin_path=f"{aim_apply_node}.PrimaryAxis",
+            value=_vec_pin_literal(binding.get("aim_axis_vector") or [1.0, 0.0, 0.0]),
+        )
+        _add_pin_default(
+            set_defaults,
+            pin_path=f"{aim_apply_node}.SecondaryAxis",
+            value=_vec_pin_literal(binding.get("up_axis_vector") or [0.0, 0.0, 1.0]),
+        )
+        _add_pin_default(set_defaults, pin_path=f"{aim_apply_node}.Weight", value=str(binding.get("weight", 1.0)))
+        _add_pin_default(set_defaults, pin_path=f"{aim_apply_node}.Item", value=f'(Type={target_item_type},Name="{target_item_name}")')
+        _add_pin_default(set_defaults, pin_path=f"{aim_apply_node}.Space", value=source_space)
+        _add_pin_default(set_defaults, pin_path=f"{aim_apply_node}.bPropagateToChildren", value="True")
+        _add_pin_default(set_defaults, pin_path=f"{aim_add_node}.B", value=_vec_pin_literal(binding.get("offset_vector") or [0.0, 0.0, 0.0]))
+        extra_links.append({"source": f"{get_node}.Transform.Translation", "target": f"{aim_vector_node}.A", "stage": stage_name})
+        extra_links.append({"source": f"{set_node}.Value.Translation", "target": f"{aim_vector_node}.B", "stage": stage_name})
+        extra_links.append({"source": f"{aim_vector_node}.Result", "target": f"{aim_add_node}.A", "stage": stage_name})
+        extra_links.append({"source": f"{aim_add_node}.Result", "target": f"{aim_apply_node}.Target", "stage": stage_name})
+        extra_links.append({"source": f"{set_node}.ExecuteContext", "target": f"{aim_apply_node}.ExecuteContext", "stage": stage_name})
+
+    if stage_name == "forward" and binding.get("hand_operator"):
+        operator = str(binding.get("hand_operator"))
+        hand_control = str(binding.get("hand_global_control") or source_control)
+        input_channel = str(binding.get("hand_input_channel") or "rotateX")
+        target_axis = str(binding.get("hand_target_axis") or "Y")
+        factor = float(binding.get("hand_factor", 1.0))
+
+        hand_get = f"{graph_module_name}_{stage_tag}_Hand_{index}_{operator}_Get"
+        hand_mul = f"{graph_module_name}_{stage_tag}_Hand_{index}_{operator}_Mul"
+        hand_add = f"{graph_module_name}_{stage_tag}_Hand_{index}_{operator}_Add"
+        hand_neg = f"{graph_module_name}_{stage_tag}_Hand_{index}_{operator}_Neg"
+        extra_nodes.extend(
+            [
+                {
+                    "name": hand_get,
+                    "struct_path": "/Script/ControlRig.RigUnit_GetControlFloat",
+                    "method_name": "Execute",
+                    "position": [base_x + 110.0, stage_y + 120.0],
+                },
+                {
+                    "name": hand_mul,
+                    "struct_path": "/Script/RigVM.RigVMFunction_MathDoubleMul",
+                    "method_name": "Execute",
+                    "position": [base_x + 270.0, stage_y + 120.0],
+                },
+                {
+                    "name": hand_add,
+                    "struct_path": "/Script/RigVM.RigVMFunction_MathDoubleAdd",
+                    "method_name": "Execute",
+                    "position": [base_x + 430.0, stage_y + 120.0],
+                },
+                {
+                    "name": hand_neg,
+                    "struct_path": "/Script/RigVM.RigVMFunction_MathDoubleNegate",
+                    "method_name": "Execute",
+                    "position": [base_x + 590.0, stage_y + 120.0],
+                },
+            ]
+        )
+        _add_pin_default(
+            set_defaults,
+            pin_path=f"{hand_get}.Control",
+            pin_path_candidates=[f"{hand_get}.ControlFloat", f"{hand_get}.Name"],
+            value=hand_control,
+        )
+        _add_pin_default(
+            set_defaults,
+            pin_path=f"{hand_get}.Name",
+            pin_path_candidates=[f"{hand_get}.Channel", f"{hand_get}.FloatName"],
+            value=input_channel,
+        )
+        _add_pin_default(set_defaults, pin_path=f"{hand_mul}.B", value=str(factor))
+        _add_pin_default(set_defaults, pin_path=f"{hand_add}.A", value="1.0")
+        _add_pin_default(set_defaults, pin_path=f"{hand_neg}.Value", value="0.0")
+        if target_axis.upper() == "Z":
+            _add_pin_default(set_defaults, pin_path=f"{set_node}.Value.Z", value="0.0")
+        else:
+            _add_pin_default(set_defaults, pin_path=f"{set_node}.Value.Y", value="0.0")
+
+        extra_links.append({"source": f"{hand_get}.Float", "target": f"{hand_mul}.A", "stage": stage_name})
+        extra_links.append({"source": f"{hand_mul}.Result", "target": f"{hand_add}.B", "stage": stage_name})
+        extra_links.append({"source": f"{hand_add}.Result", "target": f"{hand_neg}.Value", "stage": stage_name})
+        if target_axis.upper() == "Z":
+            extra_links.append({"source": f"{hand_neg}.Result", "target": f"{set_node}.Value.Z", "stage": stage_name})
+        else:
+            extra_links.append({"source": f"{hand_neg}.Result", "target": f"{set_node}.Value.Y", "stage": stage_name})
+
+    links: List[Dict[str, Any]] = []
+    if transform_source_pin:
+        links.append({"source": transform_source_pin, "target": f"{set_node}.Value", "stage": stage_name})
+    links.extend(extra_links)
+
     return {
         "nodes": [
             {
@@ -1612,12 +1935,12 @@ def _make_stage_nodes_for_binding(
         ]
         + extra_nodes,
         "pin_defaults": get_defaults + set_defaults,
-        "transform_link": {"source": f"{get_node}.Transform", "target": f"{set_node}.Value"},
+        "transform_link": None,
+        "extra_links": links,
         "set_exec_pin": f"{set_node}.ExecuteContext",
         "stage": stage_name,
         "get_node_name": get_node,
         "set_node_name": set_node,
-        "extra_links": extra_links,
     }
 
 
@@ -1649,6 +1972,11 @@ def build_module_behavior_graph_plan(module: Dict[str, Any]) -> Dict[str, Any]:
         point_bindings = _point_target_behavior_bindings(module, default_target_bone_name=default_target_bone_name)
         bindings.extend(point_bindings)
         bindings = _point_target_channel_bindings(module, bindings)
+        bindings = _annotate_point_target_bindings(module, bindings)
+        bindings = _point_target_operator_bindings(module, bindings)
+    if module_class == "Hand":
+        bindings = _annotate_hand_bindings(module, bindings)
+        bindings = _hand_operator_bindings(module, bindings)
     if module_class in {"Limb", "QuadLimb"}:
         bindings = _limb_ik_fk_bindings(module, bindings)
     nodes: List[Dict[str, Any]] = []
@@ -1678,9 +2006,11 @@ def build_module_behavior_graph_plan(module: Dict[str, Any]) -> Dict[str, Any]:
             )
             nodes.extend(stage_nodes["nodes"])
             pin_defaults.extend(stage_nodes["pin_defaults"])
-            links.append(stage_nodes["transform_link"])
+            transform_link = stage_nodes.get("transform_link")
+            if transform_link:
+                links.append(transform_link)
+                stage_link_count += 1
             links.extend(stage_nodes.get("extra_links", []))
-            stage_link_count += 1
             stage_node_count += len(stage_nodes["nodes"])
             stage_link_count += len(stage_nodes.get("extra_links", []))
 
