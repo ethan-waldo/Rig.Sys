@@ -474,7 +474,7 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
 
         self.assertGreater(len(plan.get("nodes", [])), 0)
         self.assertGreater(len(plan.get("links", [])), 0)
-        self.assertGreater(len(plan.get("values", [])), 0)
+        self.assertGreater(len(plan.get("pin_defaults", [])), 0)
         self.assertTrue(any("SetTransform" in node["struct_path"] for node in plan["nodes"]))
         self.assertTrue(any("GetControlTransform" in node["struct_path"] for node in plan["nodes"]))
 
