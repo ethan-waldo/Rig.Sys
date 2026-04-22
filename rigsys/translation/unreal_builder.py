@@ -1300,6 +1300,32 @@ def _limb_ik_fk_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any]])
     return output
 
 
+def _point_target_channel_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    settings = module.get("module_settings", {})
+    constrain_type = str(settings.get("constrain_type") or "parent").lower()
+    if constrain_type in {"parent", ""}:
+        return bindings
+
+    channel_map = {
+        "point": ["translation"],
+        "orient": ["rotation"],
+        "scale": ["scale"],
+        "aim": ["rotation"],
+    }
+    channels = channel_map.get(constrain_type, ["translation", "rotation", "scale"])
+    output: List[Dict[str, Any]] = []
+    for binding in bindings:
+        if str(binding.get("tag", "")) != "point_target_constraint":
+            output.append(binding)
+            continue
+        for channel in channels:
+            data = dict(binding)
+            data["target_channel"] = channel
+            data["math_mode"] = f"point_target_{constrain_type}_{channel}"
+            output.append(data)
+    return output
+
+
 def _build_module_math_model(module: Dict[str, Any]) -> Dict[str, Any]:
     module_name = module.get("module_name", "Module")
     module_class = module.get("module_class", "")
@@ -1380,8 +1406,8 @@ def _build_module_math_model(module: Dict[str, Any]) -> Dict[str, Any]:
         implemented.append("weighted_point_target_binding_generation")
         if constrain_type not in {"parent", ""}:
             approximations.append(
-                f"Constraint mode '{constrain_type}' uses full transform set fallback; channel-isolated "
-                "point/orient/scale/aim units are not yet emitted."
+                f"Constraint mode '{constrain_type}' uses channel-isolated set units where possible; "
+                "aim axis reconstruction is still approximated."
             )
         if bool(settings.get("maintain_offset", True)):
             approximations.append(
@@ -1477,6 +1503,7 @@ def _make_stage_nodes_for_binding(
     source_space = str(binding.get("source_space", "GlobalSpace"))
     target_space = str(binding.get("target_space", "GlobalSpace"))
     weight = float(binding.get("weight", 1.0))
+    target_channel = str(binding.get("target_channel", "transform"))
     get_node = f"{graph_module_name}_{stage_tag}_Get_{index}"
     set_node = f"{graph_module_name}_{stage_tag}_Set_{index}"
     base_x = 200.0 + (index * 380.0)
@@ -1494,6 +1521,14 @@ def _make_stage_nodes_for_binding(
         get_defaults: List[Dict[str, Any]] = []
         _add_pin_default(get_defaults, pin_path=f"{get_node}.Control", value=str(source_control))
         _add_pin_default(get_defaults, pin_path=f"{get_node}.Space", value=source_space)
+        if target_channel == "translation":
+            set_struct = "/Script/ControlRig.RigUnit_SetTranslation"
+        elif target_channel == "rotation":
+            set_struct = "/Script/ControlRig.RigUnit_SetRotation"
+        elif target_channel == "scale":
+            set_struct = "/Script/ControlRig.RigUnit_SetScale"
+        else:
+            set_struct = "/Script/ControlRig.RigUnit_SetTransform"
         set_item = f'(Type={target_item_type},Name="{target_item_name}")'
         set_b_initial = "False"
         set_weight = str(weight)
@@ -1507,6 +1542,7 @@ def _make_stage_nodes_for_binding(
         )
         _add_pin_default(get_defaults, pin_path=f"{get_node}.Space", value=target_space)
         _add_pin_default(get_defaults, pin_path=f"{get_node}.bInitial", value="False")
+        set_struct = "/Script/ControlRig.RigUnit_SetTransform"
         set_item = f'(Type=Control,Name="{source_control}")'
         set_b_initial = "True" if stage_name == "construction" else "False"
         set_weight = "1.0"
@@ -1569,7 +1605,7 @@ def _make_stage_nodes_for_binding(
             },
             {
                 "name": set_node,
-                "struct_path": "/Script/ControlRig.RigUnit_SetTransform",
+                "struct_path": set_struct,
                 "method_name": "Execute",
                 "position": [base_x + 220.0, stage_y],
             },
@@ -1612,6 +1648,7 @@ def build_module_behavior_graph_plan(module: Dict[str, Any]) -> Dict[str, Any]:
         ]
         point_bindings = _point_target_behavior_bindings(module, default_target_bone_name=default_target_bone_name)
         bindings.extend(point_bindings)
+        bindings = _point_target_channel_bindings(module, bindings)
     if module_class in {"Limb", "QuadLimb"}:
         bindings = _limb_ik_fk_bindings(module, bindings)
     nodes: List[Dict[str, Any]] = []

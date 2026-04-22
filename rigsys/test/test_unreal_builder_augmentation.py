@@ -533,6 +533,12 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
                 for link in plan["links"]
             )
         )
+        self.assertTrue(
+            any(
+                "pin_path_candidates" in pin_default
+                for pin_default in plan["pin_defaults"]
+            )
+        )
         self.assertGreater(len(plan.get("math_models", [])), 0)
         self.assertTrue(any(model.get("module_class") == "Limb" for model in plan["math_models"]))
         limb_model = next(model for model in plan["math_models"] if model.get("module_class") == "Limb")
