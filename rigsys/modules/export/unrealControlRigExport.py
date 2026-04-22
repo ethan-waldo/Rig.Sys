@@ -791,6 +791,7 @@ _RIGSYS_SOLVE_EVENTS_SEEDED = False
 ENABLE_UNRESOLVED_LINK_WARNINGS = False
 _PIN_EXISTS_CACHE = {}
 _MISSING_STRUCT_PATHS_CACHE = {}
+_SCRIPT_STRUCT_CACHE = {}
 
 
 def _log_warning(message):
@@ -1190,13 +1191,26 @@ def _apply_rig_logic_nodes(control_rig_bp, manifest):
             )
 
 
-def _apply_rigvm_instructions(control_rig_bp, manifest):
-    """Apply RigVM instruction nodes and links when controller APIs are available."""
-    instructions = manifest.get("rigvm_instructions", [])
-    if not instructions:
-        return
+def _get_rigvm_controller(control_rig_bp):
+    """Resolve the best available RigVM controller API across UE versions."""
+    if hasattr(unreal, "RigVMEditorBlueprintLibrary"):
+        rigvm_library = unreal.RigVMEditorBlueprintLibrary
+        if hasattr(rigvm_library, "get_controller"):
+            for args in (
+                (control_rig_bp,),
+                (control_rig_bp, "RigVMModel"),
+                (control_rig_bp, "Rig Graph"),
+                (control_rig_bp, "RigVM"),
+            ):
+                try:
+                    controller = rigvm_library.get_controller(*args)
+                except TypeError:
+                    continue
+                except Exception:
+                    controller = None
+                if controller is not None:
+                    return controller
 
-    controller = None
     if hasattr(control_rig_bp, "get_controller_by_name"):
         for controller_name in ("RigVMModel", "Rig Graph", "RigVM"):
             try:
@@ -1204,12 +1218,28 @@ def _apply_rigvm_instructions(control_rig_bp, manifest):
             except Exception:
                 controller = None
             if controller is not None:
-                break
-    if controller is None and hasattr(control_rig_bp, "get_controller"):
-        try:
-            controller = control_rig_bp.get_controller()
-        except Exception:
-            controller = None
+                return controller
+
+    if hasattr(control_rig_bp, "get_controller"):
+        for args in ((), ("RigVMModel",), ("Rig Graph",), ("RigVM",)):
+            try:
+                controller = control_rig_bp.get_controller(*args)
+            except TypeError:
+                continue
+            except Exception:
+                controller = None
+            if controller is not None:
+                return controller
+    return None
+
+
+def _apply_rigvm_instructions(control_rig_bp, manifest):
+    """Apply RigVM instruction nodes and links when controller APIs are available."""
+    instructions = manifest.get("rigvm_instructions", [])
+    if not instructions:
+        return
+
+    controller = _get_rigvm_controller(control_rig_bp)
 
     if controller is None:
         _log_warning("RigVM controller API not available; rigvm_instructions kept as metadata.")
@@ -2295,30 +2325,82 @@ def _try_add_unit_node(controller, struct_paths, position, node_name):
     for struct_path in struct_paths:
         if struct_path in missing_struct_paths:
             continue
-        candidates = [
-            ((struct_path, "Execute", position, node_name), {}),
-            ((struct_path, "Execute", position), {}),
-            ((struct_path, position), {}),
-            ((struct_path,), {}),
+        if hasattr(controller, "add_unit_node_from_struct_path"):
+            candidates = [
+                ((struct_path, "Execute", position, node_name), {}),
+                ((struct_path, "Execute", position), {}),
+                ((struct_path, position, node_name), {}),
+                ((struct_path, position), {}),
+                ((struct_path,), {}),
+            ]
+            for args, kwargs in candidates:
+                try:
+                    node_handle = controller.add_unit_node_from_struct_path(*args, **kwargs)
+                    return node_handle or node_name
+                except TypeError:
+                    continue
+                except Exception as exc:
+                    error_text = str(exc)
+                    if "already exists in the graph" in error_text:
+                        # Treat pre-existing event/function nodes as a successful lookup.
+                        return node_name
+                    if "Cannot find struct for path" in error_text:
+                        # Cache unavailable structs and skip retry storms for this controller.
+                        missing_struct_paths.add(struct_path)
+                        break
+                    _log_warning(f"Call failed for {controller.add_unit_node_from_struct_path}: {exc}")
+                    break
+
+        script_struct = _resolve_script_struct(struct_path)
+        if script_struct is None or not hasattr(controller, "add_unit_node"):
+            continue
+
+        add_candidates = [
+            ((script_struct, "Execute", node_name, position, False), {}),
+            ((script_struct, "Execute", node_name, position), {}),
+            ((script_struct, "Execute", position, node_name, False), {}),
+            ((script_struct, "Execute", position, node_name), {}),
+            ((script_struct, "Execute", position), {}),
+            ((script_struct, position), {}),
+            ((script_struct,), {}),
         ]
-        for args, kwargs in candidates:
+        for args, kwargs in add_candidates:
             try:
-                controller.add_unit_node_from_struct_path(*args, **kwargs)
-                return node_name
+                node_handle = controller.add_unit_node(*args, **kwargs)
+                return node_handle or node_name
             except TypeError:
                 continue
             except Exception as exc:
                 error_text = str(exc)
                 if "already exists in the graph" in error_text:
-                    # Treat pre-existing event/function nodes as a successful lookup.
                     return node_name
                 if "Cannot find struct for path" in error_text:
-                    # Cache unavailable structs and skip retry storms for this controller.
                     missing_struct_paths.add(struct_path)
                     break
-                _log_warning(f"Call failed for {controller.add_unit_node_from_struct_path}: {exc}")
+                _log_warning(f"Call failed for {controller.add_unit_node}: {exc}")
                 break
     return None
+
+
+def _resolve_script_struct(struct_path):
+    """Resolve ScriptStruct object from path for add_unit_node APIs."""
+    if struct_path in _SCRIPT_STRUCT_CACHE:
+        return _SCRIPT_STRUCT_CACHE[struct_path]
+
+    struct_object = None
+    if hasattr(unreal, "find_object"):
+        try:
+            struct_object = unreal.find_object(None, struct_path)
+        except Exception:
+            struct_object = None
+    if struct_object is None and hasattr(unreal, "load_object"):
+        try:
+            struct_object = unreal.load_object(None, struct_path)
+        except Exception:
+            struct_object = None
+
+    _SCRIPT_STRUCT_CACHE[struct_path] = struct_object
+    return struct_object
 
 
 def _resolve_node_path(node_handle, fallback_name):
