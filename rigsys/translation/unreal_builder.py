@@ -1289,6 +1289,8 @@ def _limb_ik_fk_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any]])
         if role == "limb_fk":
             data = dict(binding)
             data["weight_pin_path"] = switch_pin
+            data["visibility_pin_path"] = switch_pin
+            data["visibility_channel"] = "Visibility"
             data["math_mode"] = "ik_fk_fk_branch"
             output.append(data)
             continue
@@ -1297,6 +1299,9 @@ def _limb_ik_fk_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any]])
             data = dict(binding)
             data["weight_pin_path"] = switch_pin
             data["weight_invert"] = True
+            data["visibility_pin_path"] = switch_pin
+            data["visibility_invert"] = True
+            data["visibility_channel"] = "Visibility"
             data["math_mode"] = "ik_fk_ik_branch"
             output.append(data)
             continue
@@ -1575,6 +1580,68 @@ def _limb_foot_roll_operator_nodes(
         {"source": f"{foot_add}.Result", "target": f"{foot_neg}.Value", "stage": stage_name},
         {"source": f"{foot_neg}.Result", "target": f"{set_node}.Value.{axis_pin}", "stage": stage_name},
     ]
+    return {"nodes": nodes, "links": links}
+
+
+def _limb_visibility_operator_nodes(
+    *,
+    stage_name: str,
+    graph_module_name: str,
+    stage_tag: str,
+    index: int,
+    binding: Dict[str, Any],
+    base_x: float,
+    stage_y: float,
+    set_node: str,
+    set_defaults: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if stage_name != "forward":
+        return {"nodes": [], "links": []}
+    visibility_pin_path = str(binding.get("visibility_pin_path") or "")
+    if not visibility_pin_path:
+        return {"nodes": [], "links": []}
+
+    channel = str(binding.get("visibility_channel") or "Visibility")
+    invert = bool(binding.get("visibility_invert", False))
+    vis_get = f"{graph_module_name}_{stage_tag}_Vis_{index}"
+    vis_neg = f"{graph_module_name}_{stage_tag}_VisOneMinus_{index}"
+    nodes = [
+        {
+            "name": vis_get,
+            "struct_path": "/Script/ControlRig.RigUnit_GetControlFloat",
+            "method_name": "Execute",
+            "position": [base_x + 110.0, stage_y - 220.0],
+        }
+    ]
+    _add_pin_default(
+        set_defaults,
+        pin_path=f"{vis_get}.Control",
+        pin_path_candidates=[f"{vis_get}.ControlFloat", f"{vis_get}.Name"],
+        value=str(binding.get("source_control", "")),
+    )
+    _add_pin_default(
+        set_defaults,
+        pin_path=f"{vis_get}.Name",
+        pin_path_candidates=[f"{vis_get}.Channel", f"{vis_get}.FloatName"],
+        value=channel,
+    )
+
+    links: List[Dict[str, Any]] = []
+    if invert:
+        nodes.append(
+            {
+                "name": vis_neg,
+                "struct_path": "/Script/RigVM.RigVMFunction_MathDoubleSub",
+                "method_name": "Execute",
+                "position": [base_x + 290.0, stage_y - 220.0],
+            }
+        )
+        _add_pin_default(set_defaults, pin_path=f"{vis_neg}.A", value="1.0")
+        links.append({"source": f"{vis_get}.Float", "target": f"{vis_neg}.B", "stage": stage_name})
+        links.append({"source": f"{vis_neg}.Result", "target": f"{set_node}.Weight", "stage": stage_name})
+    else:
+        links.append({"source": f"{vis_get}.Float", "target": f"{set_node}.Weight", "stage": stage_name})
+
     return {"nodes": nodes, "links": links}
 
 
@@ -2040,6 +2107,20 @@ def _make_stage_nodes_for_binding(
     )
     extra_nodes.extend(foot_roll_ops["nodes"])
     extra_links.extend(foot_roll_ops["links"])
+
+    visibility_ops = _limb_visibility_operator_nodes(
+        stage_name=stage_name,
+        graph_module_name=graph_module_name,
+        stage_tag=stage_tag,
+        index=index,
+        binding=binding,
+        base_x=base_x,
+        stage_y=stage_y,
+        set_node=set_node,
+        set_defaults=set_defaults,
+    )
+    extra_nodes.extend(visibility_ops["nodes"])
+    extra_links.extend(visibility_ops["links"])
 
     links: List[Dict[str, Any]] = []
     if transform_source_pin:

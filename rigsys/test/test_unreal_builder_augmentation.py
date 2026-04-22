@@ -536,6 +536,13 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         )
         self.assertTrue(
             any(
+                link.get("stage") == "forward" and "Vis" in str(link.get("source", ""))
+                for link in plan["links"]
+                if "source" in link and ".Weight" in str(link.get("target", ""))
+            )
+        )
+        self.assertTrue(
+            any(
                 "pin_path_candidates" in pin_default
                 for pin_default in plan["pin_defaults"]
             )
@@ -544,6 +551,7 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         self.assertTrue(any(model.get("module_class") == "Limb" for model in plan["math_models"]))
         limb_model = next(model for model in plan["math_models"] if model.get("module_class") == "Limb")
         self.assertTrue(any(eq.get("id") == "ik_fk_rotation_blend" for eq in limb_model.get("equations", [])))
+        self.assertTrue(any(eq.get("id") == "ik_fk_visibility_reverse" for eq in limb_model.get("equations", [])))
         point_model = next(model for model in plan["math_models"] if model.get("module_class") == "PointTarget")
         self.assertEqual(point_model.get("implementation_status"), "implemented")
         self.assertFalse(any("maintain_offset" in gap for gap in point_model.get("approximation_gaps", [])))
