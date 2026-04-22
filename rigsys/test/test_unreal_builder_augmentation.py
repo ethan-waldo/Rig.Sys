@@ -88,6 +88,81 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         self.assertIn("L_Leg_Global_Foot_CTRL", generated_names)
         self.assertIn("L_Leg_Toe_Foot_CTRL", generated_names)
 
+    def test_hand_generates_explicit_offset_chain_controls(self):
+        module = {
+            "module_name": "L_Hand",
+            "module_class": "Hand",
+            "proxies": [
+                {"name": "Root", "parent": None, "position": [0, 0, 0], "rotation": [0, 0, 0]},
+                {"name": "Finger0_0", "parent": "Root", "position": [1, 0, 0], "rotation": [0, 0, 0]},
+                {"name": "Thumb_0", "parent": "Root", "position": [-1, 0, 0], "rotation": [0, 0, 0]},
+            ],
+            "controls": [
+                {
+                    "name": "L_Hand_Finger0_0_CTRL",
+                    "role": "finger",
+                    "shape": "circle",
+                    "scale": [1, 1, 1],
+                    "position": [1, 0, 0],
+                    "rotation": [0, 0, 0],
+                    "driven_proxy": "Finger0_0",
+                    "parent_proxy": "Root",
+                    "parent_control": None,
+                },
+                {
+                    "name": "L_Hand_Thumb_0_CTRL",
+                    "role": "thumb",
+                    "shape": "circle",
+                    "scale": [1, 1, 1],
+                    "position": [-1, 0, 0],
+                    "rotation": [0, 0, 0],
+                    "driven_proxy": "Thumb_0",
+                    "parent_proxy": "Root",
+                    "parent_control": None,
+                },
+            ],
+            "module_settings": {
+                "add_offset": True,
+                "meta": True,
+                "ctrl_scale": [1, 1, 1],
+            },
+        }
+        generated = generate_augmented_controls(module)
+        generated_names = {control["name"] for control in generated}
+
+        self.assertIn("L_Hand_Finger0_0_UpDn_CTRL", generated_names)
+        self.assertIn("L_Hand_Finger0_0_Twist_CTRL", generated_names)
+        self.assertIn("L_Hand_Finger0_0_Splay_CTRL", generated_names)
+        self.assertIn("L_Hand_Thumb_0_UpDn_CTRL", generated_names)
+        self.assertIn("L_Hand_Thumb_0_Twist_CTRL", generated_names)
+        self.assertIn("L_Hand_Thumb_0_Splay_CTRL", generated_names)
+
+    def test_quad_limb_generates_auto_roll_controls(self):
+        module = {
+            "module_name": "L_QuadLeg",
+            "module_class": "QuadLimb",
+            "proxies": [
+                {"name": "Root", "parent": None, "position": [0, 12, 0], "rotation": [0, 0, 0]},
+                {"name": "Start", "parent": "Root", "position": [1, 10, 0], "rotation": [0, 0, 0]},
+                {"name": "UpMid", "parent": "Start", "position": [1, 7, 1], "rotation": [0, 0, 0]},
+                {"name": "LoMid", "parent": "UpMid", "position": [1, 4, -1], "rotation": [0, 0, 0]},
+                {"name": "End", "parent": "LoMid", "position": [1, 1, 0], "rotation": [0, 0, 0]},
+            ],
+            "controls": [],
+            "module_settings": {
+                "name_set": {"Root": "Root", "Start": "Start", "UpMid": "UpMid", "LoMid": "LoMid", "End": "End"},
+                "curved_calf": True,
+                "ctrl_scale": [1, 1, 1],
+            },
+        }
+        generated = generate_augmented_controls(module)
+        generated_names = {control["name"] for control in generated}
+
+        self.assertIn("L_QuadLeg_UpperAutoRoll_0_CTRL", generated_names)
+        self.assertIn("L_QuadLeg_UpperAutoRoll_2_CTRL", generated_names)
+        self.assertIn("L_QuadLeg_LowerAutoRoll_4_CTRL", generated_names)
+        self.assertIn("L_QuadLeg_AutoRollSettings_CTRL", generated_names)
+
     def test_augment_payload_materializes_generated_controls(self):
         payload = {
             "rig_name": "Demo",

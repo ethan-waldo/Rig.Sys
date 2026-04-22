@@ -166,6 +166,85 @@ def _add_fk_offsets(
     return output
 
 
+def _add_hand_offset_controls(
+    module: Dict[str, Any],
+    existing_controls: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    settings = module.get("module_settings", {})
+    if not settings.get("add_offset"):
+        return []
+    output = []
+    for control in existing_controls:
+        role = control.get("role", "")
+        if role not in {"finger", "thumb", "hand_root", "hand_global"}:
+            continue
+
+        base_name = control["name"]
+        updn_name = re.sub(r"_CTRL$", "_UpDn_CTRL", base_name)
+        if updn_name == base_name:
+            updn_name = f"{base_name}_UpDn"
+        twist_name = re.sub(r"_CTRL$", "_Twist_CTRL", base_name)
+        if twist_name == base_name:
+            twist_name = f"{base_name}_Twist"
+        splay_name = re.sub(r"_CTRL$", "_Splay_CTRL", base_name)
+        if splay_name == base_name:
+            splay_name = f"{base_name}_Splay"
+
+        base_scale = _vec(control.get("scale"), [1.0, 1.0, 1.0])
+        updn_scale = _vec_scale(base_scale, 0.9)
+        twist_scale = _vec_scale(base_scale, 0.8)
+        splay_scale = _vec_scale(base_scale, 0.75)
+
+        base_position = control.get("position", [0.0, 0.0, 0.0])
+        base_rotation = control.get("rotation", [0.0, 0.0, 0.0])
+        driven_proxy = control.get("driven_proxy")
+        parent_proxy = control.get("parent_proxy")
+
+        output.append(
+            _make_control(
+                name=updn_name,
+                role="hand_updn_offset",
+                shape="Circle",
+                scale=updn_scale,
+                position=base_position,
+                rotation=base_rotation,
+                parent_control=base_name,
+                parent_proxy=parent_proxy,
+                driven_proxy=driven_proxy,
+                metadata={"generated_from": base_name},
+            )
+        )
+        output.append(
+            _make_control(
+                name=twist_name,
+                role="hand_twist_offset",
+                shape="Circle",
+                scale=twist_scale,
+                position=base_position,
+                rotation=base_rotation,
+                parent_control=updn_name,
+                parent_proxy=parent_proxy,
+                driven_proxy=driven_proxy,
+                metadata={"generated_from": base_name},
+            )
+        )
+        output.append(
+            _make_control(
+                name=splay_name,
+                role="hand_splay_offset",
+                shape="Circle",
+                scale=splay_scale,
+                position=base_position,
+                rotation=base_rotation,
+                parent_control=twist_name,
+                parent_proxy=parent_proxy,
+                driven_proxy=driven_proxy,
+                metadata={"generated_from": base_name},
+            )
+        )
+    return output
+
+
 def _add_fk_reverse(module: Dict[str, Any], existing_controls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     settings = module.get("module_settings", {})
     if not settings.get("reverse"):
@@ -193,6 +272,93 @@ def _add_fk_reverse(module: Dict[str, Any], existing_controls: List[Dict[str, An
             )
         )
         parent_name = rev_name
+    return output
+
+
+def _add_quad_limb_auto_roll_controls(
+    module: Dict[str, Any],
+    proxy_map: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    settings = module.get("module_settings", {})
+    name_set = settings.get("name_set") or {}
+    start_name = name_set.get("Start", "Start")
+    up_mid_name = name_set.get("UpMid", "UpMid")
+    lo_mid_name = name_set.get("LoMid", "LoMid")
+    end_name = name_set.get("End", "End")
+
+    start_proxy = proxy_map.get(start_name)
+    up_mid_proxy = proxy_map.get(up_mid_name)
+    lo_mid_proxy = proxy_map.get(lo_mid_name)
+    end_proxy = proxy_map.get(end_name)
+    if not start_proxy or not up_mid_proxy or not lo_mid_proxy or not end_proxy:
+        return []
+
+    upper_count = 3
+    lower_count = 5 if settings.get("curved_calf") else 3
+    base_scale = _vec(settings.get("ctrl_scale"), [1.0, 1.0, 1.0])
+    output = []
+
+    start_pos = _vec(start_proxy.get("position"))
+    up_mid_pos = _vec(up_mid_proxy.get("position"))
+    start_rot = _vec(start_proxy.get("rotation"))
+    up_mid_rot = _vec(up_mid_proxy.get("rotation"))
+    previous = None
+    for idx in range(upper_count):
+        alpha = float(idx + 1) / float(upper_count + 1)
+        ctrl_name = f"{module['module_name']}_UpperAutoRoll_{idx}_CTRL"
+        output.append(
+            _make_control(
+                name=ctrl_name,
+                role="quad_upper_auto_roll",
+                shape="Circle",
+                scale=_vec_scale(base_scale, 0.9),
+                position=_vec_lerp(start_pos, up_mid_pos, alpha),
+                rotation=_vec_lerp(start_rot, up_mid_rot, alpha),
+                parent_control=previous,
+                driven_proxy=up_mid_name,
+                metadata={"alpha": alpha},
+            )
+        )
+        previous = ctrl_name
+
+    lo_mid_pos = _vec(lo_mid_proxy.get("position"))
+    end_pos = _vec(end_proxy.get("position"))
+    lo_mid_rot = _vec(lo_mid_proxy.get("rotation"))
+    end_rot = _vec(end_proxy.get("rotation"))
+    previous = None
+    for idx in range(lower_count):
+        alpha = float(idx + 1) / float(lower_count + 1)
+        ctrl_name = f"{module['module_name']}_LowerAutoRoll_{idx}_CTRL"
+        output.append(
+            _make_control(
+                name=ctrl_name,
+                role="quad_lower_auto_roll",
+                shape="Circle",
+                scale=_vec_scale(base_scale, 0.85),
+                position=_vec_lerp(lo_mid_pos, end_pos, alpha),
+                rotation=_vec_lerp(lo_mid_rot, end_rot, alpha),
+                parent_control=previous,
+                driven_proxy=end_name,
+                metadata={"alpha": alpha, "curved_calf": bool(settings.get("curved_calf"))},
+            )
+        )
+        previous = ctrl_name
+
+    output.append(
+        _make_control(
+            name=f"{module['module_name']}_AutoRollSettings_CTRL",
+            role="quad_auto_roll_settings",
+            shape="Square",
+            scale=_vec_scale(base_scale, 1.1),
+            position=start_pos,
+            rotation=start_rot,
+            metadata={
+                "upper_controls": upper_count,
+                "lower_controls": lower_count,
+                "curved_calf": bool(settings.get("curved_calf")),
+            },
+        )
+    )
     return output
 
 
@@ -362,8 +528,10 @@ def generate_augmented_controls(module: Dict[str, Any]) -> List[Dict[str, Any]]:
             existing_names.add(name)
             output.append(item)
 
-    if module_class in {"FK", "FKSegment", "Hand"}:
+    if module_class in {"FK", "FKSegment"}:
         add_many(_add_fk_offsets(module, existing_controls))
+    if module_class == "Hand":
+        add_many(_add_hand_offset_controls(module, existing_controls))
     if module_class == "FKSegment":
         add_many(_add_fk_reverse(module, existing_controls))
     if module_class in {"Limb", "QuadLimb"}:
@@ -371,6 +539,8 @@ def generate_augmented_controls(module: Dict[str, Any]) -> List[Dict[str, Any]]:
         if pv_ctrl:
             add_many([pv_ctrl])
         add_many(_add_limb_foot_roll(module, proxy_map))
+    if module_class == "QuadLimb":
+        add_many(_add_quad_limb_auto_roll_controls(module, proxy_map))
     if module_class == "RibbonBindIK":
         add_many(_add_ribbon_meta_controls(module, proxy_map))
     if module_class == "PointTarget":
