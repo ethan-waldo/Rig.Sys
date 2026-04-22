@@ -120,9 +120,11 @@ def _add_control_if_missing(hierarchy, parent_control: Optional[str], control: D
 
     parent_key = hierarchy.get_control_key(parent_control) if parent_control else unreal.RigElementKey()
     shape_scale = control.get("scale", [1.0, 1.0, 1.0])
+    control_position = control.get("position", [0.0, 0.0, 0.0])
+    control_rotation = control.get("rotation", [0.0, 0.0, 0.0])
     initial_transform = unreal.Transform(
-        location=unreal.Vector(0.0, 0.0, 0.0),
-        rotation=unreal.Rotator(0.0, 0.0, 0.0).quaternion(),
+        location=_vector_from_list(control_position),
+        rotation=_rotator_from_list(control_rotation).quaternion(),
         scale=_vector_from_list(shape_scale),
     )
     settings = unreal.RigControlSettings()
@@ -182,11 +184,26 @@ def build_control_rig_from_payload(
                 rotation=proxy.get("rotation", [0.0, 0.0, 0.0]),
             )
 
-        control_parent = None
+        control_name_to_proxy_bone = {}
         for control in module.get("controls", []):
-            declared_parent = control.get("parent_control") or control_parent
+            driven_proxy = control.get("driven_proxy")
+            if driven_proxy and driven_proxy in proxy_root_lookup:
+                control_name_to_proxy_bone[control["name"]] = proxy_root_lookup[driven_proxy]
+            else:
+                control_name_to_proxy_bone[control["name"]] = module_root
+
+        for control in module.get("controls", []):
+            declared_parent = control.get("parent_control")
+            if not declared_parent:
+                parent_proxy_name = control.get("parent_proxy")
+                if parent_proxy_name:
+                    parent_proxy_bone = proxy_root_lookup.get(parent_proxy_name)
+                    if parent_proxy_bone:
+                        for existing_name, proxy_bone in control_name_to_proxy_bone.items():
+                            if proxy_bone == parent_proxy_bone and existing_name != control["name"]:
+                                declared_parent = existing_name
+                                break
             _add_control_if_missing(hierarchy=hierarchy, parent_control=declared_parent, control=control)
-            control_parent = control["name"]
 
     control_rig.request_auto_vm_recompilation()
     unreal.EditorAssetLibrary.save_asset(control_rig_path, only_if_is_dirty=False)

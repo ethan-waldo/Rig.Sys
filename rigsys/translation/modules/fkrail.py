@@ -12,7 +12,14 @@ class FKSegmentTranslator(GenericTranslator):
 
     module_type = "FKSegment"
 
-    def build_metadata(self, module: Any) -> Dict[str, Any]:
-        metadata = super().build_metadata(module)
-        metadata["segment_count"] = len(getattr(module, "proxies", {}))
-        return metadata
+    def build_module_settings(self, module: Any) -> Dict[str, Any]:
+        settings = super().build_module_settings(module)
+        settings.update(
+            {
+                "segments": getattr(module, "segments", None),
+                "reverse": bool(getattr(module, "reverse", False)),
+                "ik_rail": bool(getattr(module, "IKRail", False)),
+                "add_offset": bool(getattr(module, "addOffset", False)),
+            }
+        )
+        return settings

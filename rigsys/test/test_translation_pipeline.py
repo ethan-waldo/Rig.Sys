@@ -115,10 +115,14 @@ class TestTranslationPipeline(unittest.TestCase):
         self.assertEqual(root["controls"][0]["name"], "M_Root_CTRL")
         self.assertEqual(root["controls"][1]["name"], "M_RootOffset_CTRL")
         self.assertEqual(root["controls"][1]["parent_control"], "M_Root_CTRL")
+        self.assertEqual(root["controls"][0]["position"], [1.0, 2.0, 3.0])
+        self.assertEqual(root["module_settings"]["ctrl_shape"], "circle")
 
         arm = payload["modules"][1]
         self.assertEqual(arm["module_class"], "TestMotionModule")
         self.assertEqual(arm["controls"][0]["name"], "L_Arm_Proxy1_CTRL")
         self.assertEqual(arm["controls"][0]["shape"], "box")
+        self.assertEqual(arm["controls"][0]["position"], [4.0, 5.0, 6.0])
+        self.assertEqual(arm["controls"][0]["role"], "fk")
         self.assertEqual(arm["metadata"]["mirror"], True)
         self.assertEqual(arm["metadata"]["aim_axis"], "+x")

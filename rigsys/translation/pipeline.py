@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Dict, List
 
 from rigsys.translation.models import RigDefinition, RigModuleDefinition
 from rigsys.translation.registry import translate_motion_module
+
+logger = logging.getLogger(__name__)
 
 
 def translate_motion_modules(rig) -> List[RigModuleDefinition]:
@@ -16,6 +19,17 @@ def translate_motion_modules(rig) -> List[RigModuleDefinition]:
         rig.motionModules.values(),
         key=lambda module: module.buildOrder,
     )
+    # Ensure mirrored modules generated in preBuild are also included in the export payload.
+    if hasattr(rig, "preBuild"):
+        try:
+            rig.preBuild()
+            ordered_modules = sorted(
+                rig.motionModules.values(),
+                key=lambda module: module.buildOrder,
+            )
+        except Exception as exc:
+            # Translation should remain best-effort even when preBuild side effects fail.
+            logger.warning("Rig preBuild failed during translation export: %s", exc)
     return [translate_motion_module(module) for module in ordered_modules]
 
 

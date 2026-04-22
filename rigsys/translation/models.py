@@ -43,8 +43,12 @@ class ControlDefinition:
     shape: str
     scale: List[float]
     role: str
+    position: List[float]
+    rotation: List[float]
     driven_proxy: Optional[str] = None
+    parent_proxy: Optional[str] = None
     parent_control: Optional[str] = None
+    space: str = "global"
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -54,8 +58,12 @@ class ControlDefinition:
             "shape": self.shape,
             "scale": self.scale,
             "role": self.role,
+            "position": self.position,
+            "rotation": self.rotation,
             "driven_proxy": self.driven_proxy,
+            "parent_proxy": self.parent_proxy,
             "parent_control": self.parent_control,
+            "space": self.space,
             "metadata": self.metadata,
         }
 
@@ -76,6 +84,7 @@ class RigModuleDefinition:
     plugs: List[str]
     proxies: List[ProxyDefinition]
     controls: List[ControlDefinition]
+    module_settings: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -93,6 +102,7 @@ class RigModuleDefinition:
             "plugs": self.plugs,
             "proxies": [proxy.to_dict() for proxy in self.proxies],
             "controls": [control.to_dict() for control in self.controls],
+            "module_settings": self.module_settings,
             "metadata": self.metadata,
         }
 

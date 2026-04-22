@@ -93,6 +93,10 @@ class ExampleCharacter(api_rig.Rig):
             #     exportSelected=False,
             #     nodesToExport=None,
             # ),
+            # "ControlRigExport": export.ControlRigExport(
+            #     self,
+            #     exportPath=os.path.join(self.exampleCharacterFolder, "ExampleRig_controlrig.json"),
+            # ),
         }
 
 

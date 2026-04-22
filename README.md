@@ -147,25 +147,29 @@ Rig.Sys now includes a translation pipeline that converts motion modules into a 
 - A registry in `rigsys/translation/registry.py` picks the right translator for each module.
 - The payload schema is defined in `rigsys/translation/models.py`.
 
-### Maya export script
+### Maya export target integration
 
-Use `example/maya_translate_rig_to_controlrig.py` in Maya Python to export a translated rig payload:
+You can now add Control Rig translation as an export target directly in your existing rig script (same pattern as FBX/MB):
 
 ```python
-from example.maya_translate_rig_to_controlrig import run
+import rigsys.modules.export as export
 
-run(
-    rig_class_path="example.exampleCharacter.ExampleCharacter",
-    output_json_path="C:/temp/example_controlrig_payload.json",
-)
+self.exportModules = {
+    "FBXExport": export.FBXExport(
+        self,
+        exportPath="C:/temp/ExampleRig.fbx",
+        exportAll=True,
+    ),
+    "ControlRigExport": export.ControlRigExport(
+        self,
+        exportPath="C:/temp/ExampleRig_controlrig.json",
+    ),
+}
 ```
 
-Arguments:
+`ControlRigExport` writes a JSON payload translated from motion modules using the per-module translators in `rigsys/translation/modules/`.
 
-- `rig_class_path`: Dotted import path to your rig class (must subclass `api_rig.Rig`).
-- `output_json_path`: Where translated JSON should be written.
-- `build_rig`: Optional, defaults to `False`. Set `True` if you want to run `rig.build()` before translating.
-- `use_saved_proxy_data` and `proxy_data_file`: Optional proxy-loading controls passed into `rig.build()`.
+If you prefer ad-hoc export outside export modules, `example/maya_translate_rig_to_controlrig.py` is still available.
 
 ### Unreal import + auto-build script
 
@@ -185,4 +189,4 @@ This script:
 
 1. Imports your FBX as a skeletal mesh.
 2. Creates a new Control Rig asset.
-3. Builds module/proxy bones and controls from the translated Maya payload.
+3. Builds module/proxy bones and controls from the translated Maya payload, including control transform placement and parent relationships.
