@@ -189,4 +189,5 @@ This script:
 
 1. Imports your FBX as a skeletal mesh.
 2. Creates a new Control Rig asset.
-3. Builds module/proxy bones and controls from the translated Maya payload, including control transform placement and parent relationships.
+3. Builds module/proxy bones and translated controls (with control transform placement and parent relationships).
+4. Materializes module settings into additional Control Rig controls (for example: FK offsets/reverse controls, limb pole-vector + foot-roll controls, ribbon meta controls, and point-target reference controls).
