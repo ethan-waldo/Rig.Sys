@@ -136,3 +136,53 @@ testRunner.runTests(pattern="test_rig")
 ```
 
 Based on the naming convention of the tests, you can single out specific types of modules (i.e. "test_export" or "test_motion") to run all tests of that module type.
+
+## Maya to Unreal Control Rig translation
+
+Rig.Sys now includes a translation pipeline that converts motion modules into a JSON payload that an Unreal Python script can consume to auto-build a Control Rig hierarchy.
+
+### Design
+
+- Translation logic is separated by module type under `rigsys/translation/modules/` (one translator file per module type).
+- A registry in `rigsys/translation/registry.py` picks the right translator for each module.
+- The payload schema is defined in `rigsys/translation/models.py`.
+
+### Maya export script
+
+Use `example/maya_translate_rig_to_controlrig.py` in Maya Python to export a translated rig payload:
+
+```python
+from example.maya_translate_rig_to_controlrig import run
+
+run(
+    rig_class_path="example.exampleCharacter.ExampleCharacter",
+    output_json_path="C:/temp/example_controlrig_payload.json",
+)
+```
+
+Arguments:
+
+- `rig_class_path`: Dotted import path to your rig class (must subclass `api_rig.Rig`).
+- `output_json_path`: Where translated JSON should be written.
+- `build_rig`: Optional, defaults to `False`. Set `True` if you want to run `rig.build()` before translating.
+- `use_saved_proxy_data` and `proxy_data_file`: Optional proxy-loading controls passed into `rig.build()`.
+
+### Unreal import + auto-build script
+
+Use `example/unreal_import_model_and_build_controlrig.py` inside Unreal Python:
+
+```python
+from example.unreal_import_model_and_build_controlrig import run
+
+run(
+    payload_json_path="C:/temp/example_controlrig_payload.json",
+    model_fbx_path="C:/temp/example_character.fbx",
+    destination_path="/Game/AutoRig",
+)
+```
+
+This script:
+
+1. Imports your FBX as a skeletal mesh.
+2. Creates a new Control Rig asset.
+3. Builds module/proxy bones and controls from the translated Maya payload.
