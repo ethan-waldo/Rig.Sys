@@ -7,6 +7,7 @@ create a Control Rig asset using Unreal's scripting APIs.
 import json
 import logging
 import os
+import shutil
 from typing import Dict, List, Optional
 
 import maya.cmds as cmds
@@ -97,6 +98,8 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
 
         if self.createUnrealScript:
             self._ensureDirectory(scriptOutputPath)
+            self._writeTranslationLogicFiles(scriptOutputPath=scriptOutputPath)
+            self._writeModuleWorkflowDebugFiles(manifestData=manifestData, scriptOutputPath=scriptOutputPath)
             script = self._buildUnrealScript(manifestPath=self.fullExportPath)
             with open(scriptOutputPath, "w", encoding="utf-8") as handle:
                 handle.write(script)
@@ -120,6 +123,19 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
             constraints=constraints,
         )
 
+        customControlAttributes = self._collectCustomControlAttributes(controls)
+        connections = self._collectConnections(joints=joints, controls=controls, rigLogicNodes=rigLogicNodes)
+        moduleWorkflows = self._buildModuleWorkflows(
+            joints=joints,
+            controls=controls,
+            customControlAttributes=customControlAttributes,
+            constraints=constraints,
+            connections=connections,
+            rigLogicNodes=rigLogicNodes,
+            ikFkSystems=ikFkSystems,
+            rigVmInstructions=rigVmInstructions,
+        )
+
         return {
             "schema_version": 5,
             "rig_name": self._rig.name,
@@ -140,10 +156,214 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
             "rig_logic_nodes": rigLogicNodes,
             "ik_fk_systems": ikFkSystems,
             "rigvm_instructions": rigVmInstructions,
-            "custom_control_attributes": self._collectCustomControlAttributes(controls),
+            "custom_control_attributes": customControlAttributes,
             "constraints": constraints,
-            "connections": self._collectConnections(joints=joints, controls=controls, rigLogicNodes=rigLogicNodes),
+            "connections": connections,
+            "module_workflows": moduleWorkflows,
         }
+
+    def _iterRigModules(self):
+        """Yield (category, module_name, module_object) tuples from rig module maps."""
+        category_maps = [
+            ("motion", getattr(self._rig, "motionModules", {})),
+            ("deformer", getattr(self._rig, "deformerModules", {})),
+            ("utility", getattr(self._rig, "utilityModules", {})),
+            ("export", getattr(self._rig, "exportModules", {})),
+        ]
+        for category, module_map in category_maps:
+            for map_name, module in (module_map or {}).items():
+                module_name = map_name
+                if hasattr(module, "getFullName"):
+                    try:
+                        module_name = module.getFullName()
+                    except Exception:
+                        module_name = map_name
+                yield category, module_name, module
+
+    def _serializeModuleValue(self, value):
+        """Convert module settings to JSON-serializable values."""
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, (list, tuple)):
+            return [self._serializeModuleValue(item) for item in value]
+        if isinstance(value, dict):
+            serialized = {}
+            for key, item in value.items():
+                serialized[str(key)] = self._serializeModuleValue(item)
+            return serialized
+        return str(value)
+
+    def _serializeModuleSettings(self, module) -> Dict:
+        """Extract serializable, user-meaningful module settings."""
+        excluded_keys = {
+            "_rig",
+            "_parentObject",
+            "_mirrorObject",
+            "dependencies",
+            "ctrls",
+            "proxies",
+            "plugs",
+            "sockets",
+            "bindJoints",
+            "isRun",
+            "moduleNode",
+            "moduleUtilities",
+            "plugParent",
+            "worldParent",
+        }
+        data = {}
+        for key, value in vars(module).items():
+            if key.startswith("_") or key in excluded_keys:
+                continue
+            data[key] = self._serializeModuleValue(value)
+        return data
+
+    @staticmethod
+    def _moduleOwnsName(moduleName: str, nodeName: Optional[str]) -> bool:
+        """Check whether nodeName appears to belong to moduleName by naming convention."""
+        if not moduleName or not nodeName:
+            return False
+        return str(nodeName).startswith(moduleName)
+
+    def _instructionBelongsToModule(self, instruction, moduleName: str) -> bool:
+        """Best-effort module ownership check for rigvm instruction payloads."""
+        if not moduleName:
+            return False
+
+        def _contains_module(value):
+            if isinstance(value, str):
+                node_name = value.split(".", 1)[0]
+                return self._moduleOwnsName(moduleName, node_name)
+            if isinstance(value, list):
+                return any(_contains_module(item) for item in value)
+            if isinstance(value, dict):
+                return any(_contains_module(item) for item in value.values())
+            return False
+
+        return _contains_module(instruction)
+
+    def _buildModuleWorkflows(
+        self,
+        joints: List[Dict],
+        controls: List[Dict],
+        customControlAttributes: List[Dict],
+        constraints: List[Dict],
+        connections: List[Dict],
+        rigLogicNodes: List[Dict],
+        ikFkSystems: List[Dict],
+        rigVmInstructions: List[Dict],
+    ) -> Dict[str, List[Dict]]:
+        """Build per-module workflow payloads for a single-path Unreal reconstruction."""
+        workflows = {"motion": [], "deformer": [], "utility": [], "export": []}
+
+        for category, module_name, module in self._iterRigModules():
+            module_controls = [
+                control for control in controls if self._moduleOwnsName(module_name, control.get("name"))
+            ]
+            module_control_names = {control.get("name") for control in module_controls}
+            module_joints = [
+                joint for joint in joints if self._moduleOwnsName(module_name, joint.get("name"))
+            ]
+            module_constraints = []
+            for constraint in constraints:
+                driven = constraint.get("driven")
+                targets = constraint.get("targets", [])
+                if self._moduleOwnsName(module_name, driven) or any(
+                    self._moduleOwnsName(module_name, target) for target in targets
+                ):
+                    module_constraints.append(constraint)
+
+            module_logic_nodes = [
+                node for node in rigLogicNodes if self._moduleOwnsName(module_name, node.get("name"))
+            ]
+            module_ikfk = []
+            for system in ikFkSystems:
+                switch_control = system.get("switch_control")
+                if self._moduleOwnsName(module_name, switch_control):
+                    module_ikfk.append(system)
+
+            module_custom_attrs = [
+                attr for attr in customControlAttributes if attr.get("control") in module_control_names
+            ]
+            module_connections = []
+            for connection in connections:
+                source_node = (connection.get("source") or "").split(".", 1)[0]
+                destination_node = (connection.get("destination") or "").split(".", 1)[0]
+                if self._moduleOwnsName(module_name, source_node) or self._moduleOwnsName(module_name, destination_node):
+                    module_connections.append(connection)
+
+            module_instructions = [
+                instruction
+                for instruction in rigVmInstructions
+                if self._instructionBelongsToModule(instruction, module_name)
+            ]
+
+            workflows[category].append(
+                {
+                    "module_name": module_name,
+                    "module_type": type(module).__name__,
+                    "module_class": f"{type(module).__module__}.{type(module).__name__}",
+                    "build_order": getattr(module, "buildOrder", 0),
+                    "settings": self._serializeModuleSettings(module),
+                    "joints": module_joints,
+                    "controls": module_controls,
+                    "custom_control_attributes": module_custom_attrs,
+                    "constraints": module_constraints,
+                    "connections": module_connections,
+                    "rig_logic_nodes": module_logic_nodes,
+                    "ik_fk_systems": module_ikfk,
+                    "rigvm_instructions": module_instructions,
+                }
+            )
+
+        for category in workflows.keys():
+            workflows[category].sort(key=lambda item: item.get("build_order", 0))
+
+        return workflows
+
+    def _writeModuleWorkflowDebugFiles(self, manifestData: Dict, scriptOutputPath: str) -> None:
+        """Write per-module workflow debug payloads alongside generated Unreal script."""
+        workflows = manifestData.get("module_workflows", {})
+        if not workflows:
+            return
+
+        script_directory = os.path.dirname(scriptOutputPath)
+        rig_name = manifestData.get("rig_name", self._rig.name)
+        debug_directory = os.path.join(script_directory, f"{rig_name}_unreal_module_workflows")
+        os.makedirs(debug_directory, exist_ok=True)
+
+        for category, modules in workflows.items():
+            for module_payload in modules:
+                module_name = module_payload.get("module_name", "Module")
+                safe_module_name = (
+                    str(module_name).replace(":", "_").replace("|", "_").replace(".", "_").replace(" ", "_")
+                )
+                file_path = os.path.join(debug_directory, f"{category}__{safe_module_name}.json")
+                with open(file_path, "w", encoding="utf-8") as handle:
+                    json.dump(module_payload, handle, indent=4, sort_keys=True)
+
+    def _writeTranslationLogicFiles(self, scriptOutputPath: str) -> None:
+        """Copy static Unreal translation logic files alongside generated script."""
+        script_directory = os.path.dirname(scriptOutputPath)
+        package_output_directory = os.path.join(script_directory, "unreal_translation_logic")
+        os.makedirs(package_output_directory, exist_ok=True)
+
+        package_source_directory = os.path.join(
+            os.path.dirname(__file__),
+            "unreal_translation_logic",
+        )
+        package_files = [
+            "__init__.py",
+            "workflow_core.py",
+            "motion_translator.py",
+            "utility_translator.py",
+            "deformer_translator.py",
+            "export_translator.py",
+        ]
+        for file_name in package_files:
+            source_path = os.path.join(package_source_directory, file_name)
+            destination_path = os.path.join(package_output_directory, file_name)
+            shutil.copyfile(source_path, destination_path)
 
     def _collectJoints(self) -> List[Dict]:
         """Collect skeletal hierarchy from Maya scene."""
@@ -779,8 +999,10 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
         manifestLiteral = json.dumps(manifestPath)
         template = '''"""Generated by Rig.Sys UnrealControlRigExport."""
 
+import importlib
 import json
 import os
+import sys
 
 import unreal
 
@@ -795,6 +1017,29 @@ _SCENE_TRANSFORM_GET_CACHE = {}
 _SCENE_TRANSFORM_SET_CACHE = {}
 _SCENE_VISIBILITY_SET_CACHE = {}
 _SCENE_EXEC_TAIL_CACHE = {}
+_MODULE_DEBUG_LOG = []
+
+
+def _ensure_translation_logic_on_path():
+    script_directory = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+    if script_directory and script_directory not in sys.path:
+        sys.path.insert(0, script_directory)
+
+
+def _load_module_translators():
+    _ensure_translation_logic_on_path()
+    workflow_core = importlib.import_module("unreal_translation_logic.workflow_core")
+    motion_translator = importlib.import_module("unreal_translation_logic.motion_translator")
+    utility_translator = importlib.import_module("unreal_translation_logic.utility_translator")
+    deformer_translator = importlib.import_module("unreal_translation_logic.deformer_translator")
+    export_translator = importlib.import_module("unreal_translation_logic.export_translator")
+    return {
+        "workflow_core": workflow_core,
+        "motion_translator": motion_translator,
+        "utility_translator": utility_translator,
+        "deformer_translator": deformer_translator,
+        "export_translator": export_translator,
+    }
 
 
 def _log_warning(message):

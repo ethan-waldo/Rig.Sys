@@ -366,6 +366,8 @@ def test_unreal_control_rig_export_writes_manifest_script_and_fbx(tmp_path, monk
     manifestPath = tmp_path / "DemoRig_unreal_control_rig.json"
     scriptPath = tmp_path / "DemoRig_build_control_rig.py"
     fbxPath = tmp_path / "DemoRig_unreal.fbx"
+    translationLogicDir = tmp_path / "unreal_translation_logic"
+    moduleWorkflowDebugDir = tmp_path / "DemoRig_unreal_module_workflows"
 
     assert manifestPath.exists()
     assert scriptPath.exists()
@@ -397,52 +399,35 @@ def test_unreal_control_rig_export_writes_manifest_script_and_fbx(tmp_path, monk
     assert len(manifest["ik_fk_systems"]) == 1
     assert manifest["ik_fk_systems"][0]["switch_attribute"] == "M_Root_CTRL.IK_FK_Switch"
     assert len(manifest["rigvm_instructions"]) >= 6
+    assert "module_workflows" in manifest
+    assert "motion" in manifest["module_workflows"]
+    assert "utility" in manifest["module_workflows"]
     utilityInstructions = [
         instruction for instruction in manifest["rigvm_instructions"] if instruction.get("type") == "utility_node"
     ]
     assert utilityInstructions
     assert utilityInstructions[0]["utility_type"] == utilityInstructions[0]["node_type"]
     assert "operation" in utilityInstructions[0]
+    assert moduleWorkflowDebugDir.exists()
 
     scriptText = scriptPath.read_text(encoding="utf-8")
     assert "ControlRigBlueprintFactory" in scriptText
-    assert "_apply_custom_attributes" in scriptText
-    assert "_apply_constraints" in scriptText
-    assert "_apply_ik_fk_systems" in scriptText
-    assert "_apply_rig_logic_nodes" in scriptText
-    assert "_apply_rigvm_instructions" in scriptText
-    assert "_apply_ik_fk_blend_instruction" in scriptText
-    assert "_apply_visibility_instruction" in scriptText
-    assert "not_path = None" in scriptText
-    assert "_normalize_pin(switch_attr, pin_map)" in scriptText
-    assert "_apply_constraint_point_instruction" in scriptText
-    assert "_apply_constraint_orient_instruction" in scriptText
-    assert "_apply_constraint_scale_instruction" in scriptText
-    assert "_apply_constraint_aim_instruction" in scriptText
-    assert "_apply_utility_node_instruction" in scriptText
-    assert "_apply_plus_minus_average_instruction" in scriptText
-    assert "_detect_utility_channel_hint" in scriptText
-    assert "_resolve_utility_channel_suffix" in scriptText
-    assert "_utility_attr_channel_suffix" in scriptText
-    assert "_utility_operation_values" in scriptText
-    assert "_utility_node_mapping" in scriptText
-    assert "_auto_link_manifest_connections" in scriptText
-    assert "_register_pin_mapping" in scriptText
-    assert "_normalize_pin" in scriptText
-    assert "set_editor_property(" in scriptText
-    assert "unreal.Transform(" in scriptText
-    assert "add_unit_node_from_struct_path" in scriptText
-    assert "add_link" in scriptText
-    assert "RigVMFunction_MathFloatDiv" in scriptText
-    assert "RigVMFunction_MathFloatSub" in scriptText
-    assert "RigVMFunction_MathFloatCondition" in scriptText
-    assert "RigVMFunction_MathFloatClamp" in scriptText
-    assert "RigVMFunction_MathFloatRemap" in scriptText
-    assert "RigVMFunction_MathFloatPow" in scriptText
-    assert "channel_hint" in scriptText
-    assert "operation_pins" in scriptText
-    assert "_register_pin_mapping(pin_map, source, output_pin)" in scriptText
-    assert "_register_pin_mapping(pin_map, source, accumulator_pin)" in scriptText
-    assert "\"Comparison\"" in scriptText
-    assert "RigSys.RigVMInstructionsJSON" in scriptText
+    assert "unreal_translation_logic" in scriptText
+    assert "motion_translator" in scriptText
+    assert "deformer_translator" in scriptText
+    assert "utility_translator" in scriptText
+    assert "export_translator" in scriptText
+    assert "_load_module_translators" in scriptText
+    assert "_MODULE_DEBUG_LOG" in scriptText
     assert str(manifestPath) in scriptText
+
+    expectedTranslationFiles = [
+        "__init__.py",
+        "workflow_core.py",
+        "motion_translator.py",
+        "utility_translator.py",
+        "deformer_translator.py",
+        "export_translator.py",
+    ]
+    for fileName in expectedTranslationFiles:
+        assert (translationLogicDir / fileName).exists()
