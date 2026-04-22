@@ -3319,16 +3319,47 @@ def _persist_metadata(control_rig_bp, manifest):
             _log_warning(f"Failed to write metadata '{key}': {exc}")
 
 
+def _apply_module_workflows(control_rig_bp, manifest):
+    """Apply module workflows using external per-category translator files."""
+    module_workflows = manifest.get("module_workflows", {})
+    if not module_workflows:
+        return
+
+    translators = _load_module_translators()
+    workflow_core = translators["workflow_core"]
+    motion_translator = translators["motion_translator"]
+    utility_translator = translators["utility_translator"]
+    deformer_translator = translators["deformer_translator"]
+    export_translator = translators["export_translator"]
+
+    shared = {
+        "log_warning": _log_warning,
+        "apply_module_payload": _apply_module_payload,
+        "apply_rigvm": _apply_rigvm_instructions,
+    }
+
+    for category in ("motion", "deformer", "utility", "export"):
+        modules = module_workflows.get(category, [])
+        for module_payload in modules:
+            if category == "motion":
+                debug_entry = motion_translator.apply_motion_module(control_rig_bp, module_payload, shared)
+            elif category == "deformer":
+                debug_entry = deformer_translator.apply_deformer_module(control_rig_bp, module_payload, shared)
+            elif category == "utility":
+                debug_entry = utility_translator.apply_utility_module(control_rig_bp, module_payload, shared)
+            else:
+                debug_entry = export_translator.apply_export_module(control_rig_bp, module_payload, shared)
+            if debug_entry:
+                _MODULE_DEBUG_LOG.append(debug_entry)
+
+
 def main():
     manifest = _load_manifest()
     _import_fbx_if_present(manifest)
     control_rig_bp = _create_control_rig(manifest)
     _populate_hierarchy(control_rig_bp, manifest)
     _apply_custom_attributes(control_rig_bp, manifest)
-    _apply_constraints(control_rig_bp, manifest)
-    _apply_ik_fk_systems(control_rig_bp, manifest)
-    _apply_rig_logic_nodes(control_rig_bp, manifest)
-    _apply_rigvm_instructions(control_rig_bp, manifest)
+    _apply_module_workflows(control_rig_bp, manifest)
     _persist_metadata(control_rig_bp, manifest)
     unreal.EditorAssetLibrary.save_loaded_asset(control_rig_bp)
     unreal.log("[Rig.Sys] Unreal Control Rig generation complete.")
