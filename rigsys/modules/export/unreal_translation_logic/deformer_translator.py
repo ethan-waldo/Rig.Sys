@@ -1,14 +1,23 @@
-"""Deformer module translator for generated Unreal script."""
+"""Deformer module translator dispatcher."""
 
-from . import workflow_core
+from .workflow_core import module_name
+from .deformer_modules import skin_cluster_import_export
+
+
+DEFORMER_TRANSLATORS = {
+    "skinClusterImportExport": skin_cluster_import_export.translate,
+}
 
 
 def apply_deformer_module(control_rig_bp, module_payload, shared):
-    """Apply deformer module payload through shared per-module path."""
+    """Apply one deformer module payload via dedicated translator file."""
     module_type = str(module_payload.get("module_type") or "")
-    if module_type in {"skinClusterImportExport"}:
-        return workflow_core.run_shared_payload(control_rig_bp, module_payload, shared)
-    return workflow_core.mark_custom_node_required(
-        module_payload,
-        f"Unsupported deformer module type '{module_type}' requires custom node/plugin workflow.",
-    )
+    translator = DEFORMER_TRANSLATORS.get(module_type)
+    if translator is None:
+        name = module_name(module_payload)
+        logger = shared.get("log_warning")
+        note = f"Unsupported deformer module type '{module_type}'."
+        if callable(logger):
+            logger(f"[Rig.Sys][Module:{name}] {note}")
+        return {"status": "unsupported", "notes": [note]}
+    return translator(control_rig_bp, module_payload, shared)

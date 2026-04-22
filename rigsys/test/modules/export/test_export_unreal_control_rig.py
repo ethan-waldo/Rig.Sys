@@ -433,5 +433,7 @@ def test_unreal_control_rig_export_writes_manifest_script_and_fbx(tmp_path, monk
     for fileName in expectedTranslationFiles:
         assert (translationLogicDir / fileName).exists()
     motionTranslatorText = (translationLogicDir / "motion_translator.py").read_text(encoding="utf-8")
-    assert "_module_requires_custom_node" in motionTranslatorText
-    assert "_SUPPORTED_MOTION_MODULES" in motionTranslatorText
+    assert "MODULE_TRANSLATORS" in motionTranslatorText
+    assert "from .motion_modules import" in motionTranslatorText
+    rootTranslatorText = (translationLogicDir / "motion_modules" / "root.py").read_text(encoding="utf-8")
+    assert "translate(" in rootTranslatorText

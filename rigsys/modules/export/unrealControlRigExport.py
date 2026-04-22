@@ -352,18 +352,20 @@ class UnrealControlRigExport(exportBase.ExportModuleBase):
             os.path.dirname(__file__),
             "unreal_translation_logic",
         )
-        package_files = [
-            "__init__.py",
-            "workflow_core.py",
-            "motion_translator.py",
-            "utility_translator.py",
-            "deformer_translator.py",
-            "export_translator.py",
-        ]
-        for file_name in package_files:
-            source_path = os.path.join(package_source_directory, file_name)
-            destination_path = os.path.join(package_output_directory, file_name)
-            shutil.copyfile(source_path, destination_path)
+        for root, _, files in os.walk(package_source_directory):
+            relative_root = os.path.relpath(root, package_source_directory)
+            destination_root = (
+                package_output_directory
+                if relative_root == "."
+                else os.path.join(package_output_directory, relative_root)
+            )
+            os.makedirs(destination_root, exist_ok=True)
+            for file_name in files:
+                if not file_name.endswith(".py"):
+                    continue
+                source_path = os.path.join(root, file_name)
+                destination_path = os.path.join(destination_root, file_name)
+                shutil.copyfile(source_path, destination_path)
 
     def _collectJoints(self) -> List[Dict]:
         """Collect skeletal hierarchy from Maya scene."""
