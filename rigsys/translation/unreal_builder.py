@@ -3062,6 +3062,36 @@ def _controller_add_unit_node(controller, node_spec: Dict[str, Any]) -> Any:
         (
             tuple(),
             {
+                "script_struct_path": struct_path,
+                "method_name": method_name,
+                "position": position,
+                "node_name": node_name,
+                "setup_undo_redo": True,
+                "print_python_command": False,
+            },
+        ),
+        (
+            tuple(),
+            {
+                "script_struct_path": struct_path,
+                "method_name": method_name,
+                "position": position,
+                "node_name": node_name,
+                "setup_undo_redo": True,
+            },
+        ),
+        (
+            tuple(),
+            {
+                "script_struct_path": struct_path,
+                "method_name": method_name,
+                "position": position,
+                "node_name": node_name,
+            },
+        ),
+        (
+            tuple(),
+            {
                 "struct_path": struct_path,
                 "method_name": method_name,
                 "position": position,
@@ -3376,7 +3406,52 @@ def _add_bone_if_missing(hierarchy, parent: str, name: str, position: List[float
         scale=unreal.Vector(1.0, 1.0, 1.0),
     )
     hierarchy_controller = hierarchy.get_controller()
-    hierarchy_controller.add_bone(name=name, parent_key=parent_key, transform=transform, transform_in_global=True)
+    add_bone = getattr(hierarchy_controller, "add_bone", None)
+    if not callable(add_bone):
+        raise RuntimeError("RigHierarchyController.add_bone is unavailable")
+
+    # Keep call variants explicit and conservative to avoid unstable native marshaling.
+    call_variants = [
+        (
+            tuple(),
+            {
+                "name": name,
+                "parent": parent_key,
+                "transform": transform,
+                "transform_in_global": True,
+                "setup_undo": False,
+                "print_python_command": False,
+            },
+        ),
+        (
+            tuple(),
+            {
+                "name": name,
+                "parent": parent_key,
+                "transform": transform,
+                "transform_in_global": True,
+            },
+        ),
+        (
+            tuple(),
+            {
+                "name": name,
+                "parent_key": parent_key,
+                "transform": transform,
+                "transform_in_global": True,
+            },
+        ),
+        ((name, parent_key, transform, True), {}),
+    ]
+    last_error: Optional[Exception] = None
+    for args, kwargs in call_variants:
+        try:
+            add_bone(*args, **kwargs)
+            return
+        except Exception as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
 
 
 def _add_control_if_missing(hierarchy, parent_control: Optional[str], control: Dict[str, Any]):
@@ -3401,14 +3476,77 @@ def _add_control_if_missing(hierarchy, parent_control: Optional[str], control: D
     settings.shape_name = control.get("shape", "Circle")
 
     hierarchy_controller = hierarchy.get_controller()
-    hierarchy_controller.add_control(
-        name=control_name,
-        parent_key=parent_key,
-        settings=settings,
-        value=unreal.RigControlValue.make_euler_transform(unreal.EulerTransform()),
-        offset_transform=initial_transform,
-        shape_transform=initial_transform,
-    )
+    add_control = getattr(hierarchy_controller, "add_control", None)
+    if not callable(add_control):
+        raise RuntimeError("RigHierarchyController.add_control is unavailable")
+
+    control_value = unreal.RigControlValue.make_euler_transform(unreal.EulerTransform())
+    call_variants = [
+        (
+            tuple(),
+            {
+                "name": control_name,
+                "parent": parent_key,
+                "settings": settings,
+                "value": control_value,
+                "setup_undo": True,
+                "print_python_command": False,
+            },
+        ),
+        (
+            tuple(),
+            {
+                "name": control_name,
+                "parent": parent_key,
+                "settings": settings,
+                "value": control_value,
+            },
+        ),
+        (
+            tuple(),
+            {
+                "name": control_name,
+                "parent_key": parent_key,
+                "settings": settings,
+                "value": control_value,
+            },
+        ),
+        ((control_name, parent_key, settings, control_value, True, False), {}),
+        ((control_name, parent_key, settings, control_value), {}),
+    ]
+    last_error: Optional[Exception] = None
+    for args, kwargs in call_variants:
+        try:
+            add_control(*args, **kwargs)
+            break
+        except Exception as exc:
+            last_error = exc
+    else:
+        if last_error is not None:
+            raise last_error
+        return
+
+    # Optional post-create transform staging. API varies by UE version; failures are non-fatal.
+    set_control_offset = getattr(hierarchy, "set_control_offset_transform", None)
+    if callable(set_control_offset):
+        offset_variants = [
+            ((hierarchy.get_control_key(control_name), initial_transform, True), {}),
+            ((hierarchy.get_control_key(control_name), initial_transform), {}),
+            (
+                tuple(),
+                {
+                    "key": hierarchy.get_control_key(control_name),
+                    "transform": initial_transform,
+                    "initial": True,
+                },
+            ),
+        ]
+        for args, kwargs in offset_variants:
+            try:
+                set_control_offset(*args, **kwargs)
+                break
+            except Exception:
+                continue
 
 
 def build_control_rig_from_payload(

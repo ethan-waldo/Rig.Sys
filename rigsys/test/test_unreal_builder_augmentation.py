@@ -9,6 +9,8 @@ from rigsys.translation.unreal_builder import (
     apply_behavior_graph_to_control_rig,
     build_behavior_graph_plan,
     create_control_rig_asset,
+    _add_bone_if_missing,
+    _add_control_if_missing,
     generate_augmented_controls,
 )
 
@@ -1119,4 +1121,152 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         )
         self.assertEqual(call_payload["method_name"], node_spec["method_name"])
         self.assertEqual(call_payload["node_name"], node_spec["name"])
+
+    def test_add_bone_if_missing_uses_stable_parent_signature(self):
+        class _FakeHierarchyController:
+            def __init__(self):
+                self.calls = []
+
+            def add_bone(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return object()
+
+        class _FakeHierarchy:
+            def __init__(self):
+                self._controller = _FakeHierarchyController()
+
+            def get_bone_key(self, _name):
+                return None
+
+            def contains(self, _key):
+                return False
+
+            def get_controller(self):
+                return self._controller
+
+        class _FakeVector:
+            def __init__(self, x, y, z):
+                self.x, self.y, self.z = x, y, z
+
+        class _FakeRotator:
+            def __init__(self, rx, ry, rz):
+                self.rx, self.ry, self.rz = rx, ry, rz
+
+            def quaternion(self):
+                return object()
+
+        class _FakeTransform:
+            def __init__(self, location=None, rotation=None, scale=None):
+                self.location = location
+                self.rotation = rotation
+                self.scale = scale
+
+        class _FakeUnreal:
+            Vector = _FakeVector
+            Rotator = _FakeRotator
+            Transform = _FakeTransform
+
+            class RigElementKey:
+                pass
+
+        hierarchy = _FakeHierarchy()
+        with mock.patch("rigsys.translation.unreal_builder._load_unreal", return_value=_FakeUnreal):
+            _add_bone_if_missing(
+                hierarchy=hierarchy,
+                parent="ParentBone",
+                name="ChildBone",
+                position=[1.0, 2.0, 3.0],
+                rotation=[0.0, 0.0, 0.0],
+            )
+
+        args, kwargs = hierarchy.get_controller().calls[0]
+        self.assertFalse(args)
+        self.assertIn("name", kwargs)
+        self.assertIn("parent", kwargs)
+        self.assertIn("transform", kwargs)
+
+    def test_add_control_if_missing_uses_stable_add_control_signature(self):
+        class _FakeHierarchyController:
+            def __init__(self):
+                self.calls = []
+
+            def add_control(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return object()
+
+        class _FakeHierarchy:
+            def __init__(self):
+                self._controller = _FakeHierarchyController()
+
+            def get_control_key(self, _name):
+                return None
+
+            def contains(self, _key):
+                return False
+
+            def get_controller(self):
+                return self._controller
+
+        class _FakeVector:
+            def __init__(self, x, y, z):
+                self.x, self.y, self.z = x, y, z
+
+        class _FakeRotator:
+            def __init__(self, rx, ry, rz):
+                self.rx, self.ry, self.rz = rx, ry, rz
+
+            def quaternion(self):
+                return object()
+
+        class _FakeTransform:
+            def __init__(self, location=None, rotation=None, scale=None):
+                self.location = location
+                self.rotation = rotation
+                self.scale = scale
+
+        class _FakeEulerTransform:
+            pass
+
+        class _FakeRigControlValue:
+            @staticmethod
+            def make_euler_transform(_value):
+                return object()
+
+        class _FakeRigControlSettings:
+            def __init__(self):
+                self.control_type = None
+                self.display_name = None
+                self.shape_name = None
+
+        class _FakeUnreal:
+            Vector = _FakeVector
+            Rotator = _FakeRotator
+            Transform = _FakeTransform
+            EulerTransform = _FakeEulerTransform
+            RigControlValue = _FakeRigControlValue
+            RigControlSettings = _FakeRigControlSettings
+
+            class RigElementKey:
+                pass
+
+            class RigControlType:
+                EULER_TRANSFORM = "euler"
+
+        hierarchy = _FakeHierarchy()
+        control = {
+            "name": "MyControl",
+            "shape": "Circle",
+            "scale": [1.0, 1.0, 1.0],
+            "position": [0.0, 0.0, 0.0],
+            "rotation": [0.0, 0.0, 0.0],
+        }
+        with mock.patch("rigsys.translation.unreal_builder._load_unreal", return_value=_FakeUnreal):
+            _add_control_if_missing(hierarchy=hierarchy, parent_control=None, control=control)
+
+        args, kwargs = hierarchy.get_controller().calls[0]
+        self.assertFalse(args)
+        self.assertIn("name", kwargs)
+        self.assertIn("parent", kwargs)
+        self.assertIn("settings", kwargs)
+        self.assertIn("value", kwargs)
 
