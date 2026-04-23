@@ -3261,6 +3261,14 @@ def import_skeletal_mesh(fbx_file: str, destination_path: str, asset_name: Optio
     if not destination.startswith("/Game"):
         raise ValueError("destination_path must be inside /Game")
 
+    # Reuse existing skeletal mesh when present to avoid repeated destructive
+    # import cycles that can destabilize editor sessions on some UE versions.
+    if asset_name:
+        expected_path = f"{destination}/{_safe_name(asset_name)}"
+        existing_asset = unreal.EditorAssetLibrary.load_asset(expected_path)
+        if existing_asset is not None and isinstance(existing_asset, unreal.SkeletalMesh):
+            return expected_path
+
     task = unreal.AssetImportTask()
     task.set_editor_property("automated", True)
     task.set_editor_property("replace_existing", True)
@@ -3268,7 +3276,12 @@ def import_skeletal_mesh(fbx_file: str, destination_path: str, asset_name: Optio
     task.set_editor_property("filename", str(Path(fbx_file).expanduser().resolve()))
     task.set_editor_property("destination_path", destination)
     if asset_name:
-        task.set_editor_property("destination_name", _safe_name(asset_name))
+        safe_asset_name = _safe_name(asset_name)
+        existing_mesh_path = f"{destination}/{safe_asset_name}"
+        existing_mesh = unreal.EditorAssetLibrary.load_asset(existing_mesh_path)
+        if isinstance(existing_mesh, unreal.SkeletalMesh):
+            return existing_mesh_path
+        task.set_editor_property("destination_name", safe_asset_name)
 
     fbx_options = unreal.FbxImportUI()
     fbx_options.set_editor_property("import_as_skeletal", True)
@@ -3324,9 +3337,9 @@ def create_control_rig_asset(package_path: str, asset_name: str, skeletal_mesh_p
     if skeletal_mesh is None:
         raise RuntimeError(f"Could not load skeletal mesh: {skeletal_mesh_path}")
 
-    existing_asset = None
-    if unreal.EditorAssetLibrary.does_asset_exist(control_rig_path):
-        existing_asset = unreal.EditorAssetLibrary.load_asset(control_rig_path)
+    # Prefer direct load over existence query to avoid false negatives from
+    # transient registry states during editor startup/import churn.
+    existing_asset = unreal.EditorAssetLibrary.load_asset(control_rig_path)
     if existing_asset is not None:
         set_preview_mesh = getattr(existing_asset, "set_preview_mesh", None)
         if callable(set_preview_mesh):
