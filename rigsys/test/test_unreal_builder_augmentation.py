@@ -747,6 +747,50 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         self.assertEqual(limb_model.get("implementation_status"), "implemented")
         self.assertFalse(any("Foot roll math operators" in gap for gap in limb_model.get("approximation_gaps", [])))
 
+    def test_graph_plan_ribbon_bind_generates_distribution_operator_nodes(self):
+        payload = {
+            "rig_name": "GraphRig",
+            "modules": [
+                {
+                    "module_name": "M_RibbonSpine",
+                    "module_class": "RibbonBindIK",
+                    "proxies": [
+                        {"name": "Start", "parent": None, "position": [0, 0, 0], "rotation": [0, 0, 0]},
+                        {"name": "1", "parent": "Start", "position": [0, 2, 0], "rotation": [0, 0, 0]},
+                        {"name": "End", "parent": "1", "position": [0, 4, 0], "rotation": [0, 0, 0]},
+                    ],
+                    "controls": [],
+                    "module_settings": {
+                        "number_of_joints": 4,
+                        "reverse": True,
+                        "ctrl_scale": [1, 1, 1],
+                    },
+                }
+            ],
+        }
+        materialized = augment_payload_with_generated_controls(payload)
+        plan = build_behavior_graph_plan(materialized)
+        ribbon_module = plan["modules"][0]
+        node_structs = [node["struct_path"] for node in ribbon_module["nodes"]]
+        node_names = [node["name"] for node in ribbon_module["nodes"]]
+
+        self.assertTrue(any("MathVectorSub" in path for path in node_structs))
+        self.assertTrue(any("MathVectorMul" in path for path in node_structs))
+        self.assertTrue(any("MathVectorAdd" in path for path in node_structs))
+        self.assertTrue(any("RibbonAlphaMul" in name for name in node_names))
+        self.assertTrue(
+            any(
+                ".Value" in str(link.get("target", ""))
+                and "RibbonResult" in str(link.get("source", ""))
+                for link in ribbon_module["links"]
+                if link.get("stage") == "forward"
+            )
+        )
+
+        ribbon_model = next(model for model in plan["math_models"] if model.get("module_class") == "RibbonBindIK")
+        self.assertEqual(ribbon_model.get("implementation_status"), "implemented")
+        self.assertFalse(any("follicle" in gap.lower() for gap in ribbon_model.get("approximation_gaps", [])))
+
     def test_graph_plan_limb_ik_fk_visibility_reverse_nodes(self):
         payload = {
             "rig_name": "GraphRig",

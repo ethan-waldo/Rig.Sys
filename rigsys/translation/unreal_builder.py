@@ -663,11 +663,21 @@ def _add_ribbon_bind_controls(module: Dict[str, Any], proxy_map: Dict[str, Dict[
     start_rot = _vec(start.get("rotation"))
     end_rot = _vec(end.get("rotation"))
     base_scale = _vec(settings.get("ctrl_scale"), [1.0, 1.0, 1.0])
+    proxy_chain = _ordered_proxy_chain(module, exclude_names={"UpVector"})
+    chain_count = len(proxy_chain)
 
     output = []
     parent = None
     for idx in range(count):
         alpha = 0.0 if count == 1 else float(idx) / float(count - 1)
+        driven_proxy = None
+        parent_proxy = None
+        if chain_count > 0:
+            chain_index = int(round(alpha * float(max(chain_count - 1, 0))))
+            chain_index = max(0, min(chain_index, chain_count - 1))
+            sampled_proxy = proxy_chain[chain_index]
+            driven_proxy = sampled_proxy.get("name")
+            parent_proxy = sampled_proxy.get("parent")
         name = f"{module['module_name']}_Bind_{idx}_CTRL"
         output.append(
             _make_control(
@@ -678,6 +688,8 @@ def _add_ribbon_bind_controls(module: Dict[str, Any], proxy_map: Dict[str, Dict[
                 position=_vec_lerp(start_pos, end_pos, alpha),
                 rotation=_vec_lerp(start_rot, end_rot, alpha),
                 parent_control=parent,
+                driven_proxy=driven_proxy,
+                parent_proxy=parent_proxy,
                 metadata={"bind_index": idx, "count": count},
             )
         )
@@ -1343,6 +1355,29 @@ def _limb_foot_roll_operator_bindings(module: Dict[str, Any], bindings: List[Dic
     return output
 
 
+def _ribbon_bind_operator_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if module.get("module_class") != "RibbonBindIK":
+        return bindings
+    output: List[Dict[str, Any]] = []
+    for binding in bindings:
+        role = str(binding.get("source_role", ""))
+        if role != "ribbon_bind_driver":
+            output.append(binding)
+            continue
+        metadata = dict(binding.get("source_metadata") or {})
+        bind_index = int(metadata.get("bind_index", 0))
+        bind_count = max(int(metadata.get("count", 1)), 1)
+        alpha = 0.0 if bind_count <= 1 else float(bind_index) / float(bind_count - 1)
+        data = dict(binding)
+        data["ribbon_bind_operator"] = "distribution_lerp"
+        data["ribbon_bind_alpha"] = alpha
+        data["ribbon_bind_index"] = bind_index
+        data["ribbon_bind_count"] = bind_count
+        data["math_mode"] = "ribbon_bind_distribution_operator_network"
+        output.append(data)
+    return output
+
+
 def _point_target_channel_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     settings = module.get("module_settings", {})
     constrain_type = str(settings.get("constrain_type") or "parent").lower()
@@ -1499,6 +1534,49 @@ def _hand_operator_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any
     return output
 
 
+def _ribbon_bind_operator_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if module.get("module_class") != "RibbonBindIK":
+        return bindings
+
+    controls = module.get("controls", []) or []
+    bind_controls = [control for control in controls if control.get("role") == "ribbon_bind_driver" and control.get("name")]
+    if not bind_controls:
+        return bindings
+
+    bind_controls.sort(
+        key=lambda control: (
+            int((control.get("metadata") or {}).get("bind_index", 0)),
+            str(control.get("name", "")),
+        )
+    )
+    start_control = str(bind_controls[0].get("name"))
+    end_control = str(bind_controls[-1].get("name"))
+    control_lookup = {str(control.get("name")): control for control in bind_controls}
+
+    output: List[Dict[str, Any]] = []
+    for binding in bindings:
+        if str(binding.get("source_role", "")) != "ribbon_bind_driver":
+            output.append(binding)
+            continue
+
+        data = dict(binding)
+        source_name = str(binding.get("source_control", ""))
+        source_control = control_lookup.get(source_name, {})
+        metadata = source_control.get("metadata") or {}
+        bind_index = int(metadata.get("bind_index", 0))
+        bind_count = int(metadata.get("count", len(bind_controls)))
+        denominator = max(bind_count - 1, 1)
+        alpha = float(bind_index) / float(denominator)
+        data["ribbon_distribution_operator"] = True
+        data["ribbon_alpha"] = alpha
+        data["ribbon_start_control"] = start_control
+        data["ribbon_end_control"] = end_control
+        data["target_channel"] = "translation"
+        data["math_mode"] = "ribbon_bind_distribution_operator"
+        output.append(data)
+    return output
+
+
 def _limb_foot_roll_operator_nodes(
     *,
     stage_name: str,
@@ -1642,6 +1720,84 @@ def _limb_visibility_operator_nodes(
     else:
         links.append({"source": f"{vis_get}.Float", "target": f"{set_node}.Weight", "stage": stage_name})
 
+    return {"nodes": nodes, "links": links}
+
+
+def _ribbon_bind_operator_nodes(
+    *,
+    stage_name: str,
+    graph_module_name: str,
+    stage_tag: str,
+    index: int,
+    binding: Dict[str, Any],
+    base_x: float,
+    stage_y: float,
+    set_node: str,
+    set_defaults: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if stage_name != "forward":
+        return {"nodes": [], "links": []}
+    if not bool(binding.get("ribbon_distribution_operator")):
+        return {"nodes": [], "links": []}
+
+    alpha = float(binding.get("ribbon_alpha", 0.0))
+    start_control = str(binding.get("ribbon_start_control") or "")
+    end_control = str(binding.get("ribbon_end_control") or "")
+    if not start_control or not end_control:
+        return {"nodes": [], "links": []}
+
+    start_get = f"{graph_module_name}_{stage_tag}_RibbonStart_{index}"
+    end_get = f"{graph_module_name}_{stage_tag}_RibbonEnd_{index}"
+    delta = f"{graph_module_name}_{stage_tag}_RibbonDelta_{index}"
+    alpha_mul = f"{graph_module_name}_{stage_tag}_RibbonAlphaMul_{index}"
+    result_add = f"{graph_module_name}_{stage_tag}_RibbonResult_{index}"
+    nodes = [
+        {
+            "name": start_get,
+            "struct_path": "/Script/ControlRig.RigUnit_GetControlTransform",
+            "method_name": "Execute",
+            "position": [base_x + 110.0, stage_y + 240.0],
+        },
+        {
+            "name": end_get,
+            "struct_path": "/Script/ControlRig.RigUnit_GetControlTransform",
+            "method_name": "Execute",
+            "position": [base_x + 110.0, stage_y + 320.0],
+        },
+        {
+            "name": delta,
+            "struct_path": "/Script/RigVM.RigVMFunction_MathVectorSub",
+            "method_name": "Execute",
+            "position": [base_x + 300.0, stage_y + 280.0],
+        },
+        {
+            "name": alpha_mul,
+            "struct_path": "/Script/RigVM.RigVMFunction_MathVectorMul",
+            "method_name": "Execute",
+            "position": [base_x + 490.0, stage_y + 280.0],
+        },
+        {
+            "name": result_add,
+            "struct_path": "/Script/RigVM.RigVMFunction_MathVectorAdd",
+            "method_name": "Execute",
+            "position": [base_x + 680.0, stage_y + 280.0],
+        },
+    ]
+
+    _add_pin_default(set_defaults, pin_path=f"{start_get}.Control", value=start_control)
+    _add_pin_default(set_defaults, pin_path=f"{start_get}.Space", value="GlobalSpace")
+    _add_pin_default(set_defaults, pin_path=f"{end_get}.Control", value=end_control)
+    _add_pin_default(set_defaults, pin_path=f"{end_get}.Space", value="GlobalSpace")
+    _add_pin_default(set_defaults, pin_path=f"{alpha_mul}.B", value=str(alpha))
+
+    links = [
+        {"source": f"{end_get}.Transform.Translation", "target": f"{delta}.A", "stage": stage_name},
+        {"source": f"{start_get}.Transform.Translation", "target": f"{delta}.B", "stage": stage_name},
+        {"source": f"{delta}.Result", "target": f"{alpha_mul}.A", "stage": stage_name},
+        {"source": f"{alpha_mul}.Result", "target": f"{result_add}.A", "stage": stage_name},
+        {"source": f"{start_get}.Transform.Translation", "target": f"{result_add}.B", "stage": stage_name},
+        {"source": f"{result_add}.Result", "target": f"{set_node}.Value", "stage": stage_name},
+    ]
     return {"nodes": nodes, "links": links}
 
 
@@ -1789,9 +1945,7 @@ def _build_module_math_model(module: Dict[str, Any]) -> Dict[str, Any]:
             }
         )
         implemented.append("ribbon_bind_and_reverse_control_mapping")
-        approximations.append(
-            "Ribbon follicle and skinCluster deformation math is not yet recreated as explicit RigVM operators."
-        )
+        implemented.append("ribbon_bind_distribution_operator_network")
 
     implementation_status = "implemented" if not approximations else "approximate"
     if not equations and not implemented and not approximations:
@@ -2122,6 +2276,20 @@ def _make_stage_nodes_for_binding(
     extra_nodes.extend(visibility_ops["nodes"])
     extra_links.extend(visibility_ops["links"])
 
+    ribbon_ops = _ribbon_bind_operator_nodes(
+        stage_name=stage_name,
+        graph_module_name=graph_module_name,
+        stage_tag=stage_tag,
+        index=index,
+        binding=binding,
+        base_x=base_x,
+        stage_y=stage_y,
+        set_node=set_node,
+        set_defaults=set_defaults,
+    )
+    extra_nodes.extend(ribbon_ops["nodes"])
+    extra_links.extend(ribbon_ops["links"])
+
     links: List[Dict[str, Any]] = []
     if transform_source_pin:
         links.append({"source": transform_source_pin, "target": f"{set_node}.Value", "stage": stage_name})
@@ -2186,6 +2354,8 @@ def build_module_behavior_graph_plan(module: Dict[str, Any]) -> Dict[str, Any]:
     if module_class == "Hand":
         bindings = _annotate_hand_bindings(module, bindings)
         bindings = _hand_operator_bindings(module, bindings)
+    if module_class == "RibbonBindIK":
+        bindings = _ribbon_bind_operator_bindings(module, bindings)
     if module_class in {"Limb", "QuadLimb"}:
         bindings = _limb_ik_fk_bindings(module, bindings)
         bindings = _limb_foot_roll_operator_bindings(module, bindings)
