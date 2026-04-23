@@ -3375,6 +3375,123 @@ def _asset_object_path(asset: Any) -> Optional[str]:
     return None
 
 
+def _make_empty_rig_key(unreal):
+    key_class = getattr(unreal, "RigElementKey", None)
+    if key_class is None:
+        return None
+    try:
+        return key_class()
+    except Exception:
+        return None
+
+
+def _rig_element_type(unreal, kind: str):
+    element_type = getattr(unreal, "RigElementType", None)
+    if element_type is None:
+        return None
+    candidates = {
+        "bone": ("BONE", "Bone"),
+        "control": ("CONTROL", "Control"),
+    }
+    for candidate in candidates.get(kind, ()):
+        value = getattr(element_type, candidate, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _make_rig_key(unreal, *, name: str, kind: str):
+    key_class = getattr(unreal, "RigElementKey", None)
+    if key_class is None:
+        return None
+    element_type = _rig_element_type(unreal, kind)
+    call_variants = []
+    if element_type is not None:
+        call_variants.extend(
+            [
+                (tuple(), {"name": name, "type": element_type}),
+                (tuple(), {"name": name, "type_": element_type}),
+                ((name, element_type), {}),
+                ((element_type, name), {}),
+            ]
+        )
+    call_variants.extend(
+        [
+            (tuple(), {"name": name}),
+            ((name,), {}),
+            (tuple(), {}),
+        ]
+    )
+    for args, kwargs in call_variants:
+        try:
+            key = key_class(*args, **kwargs)
+            if key is not None:
+                return key
+        except Exception:
+            continue
+    return None
+
+
+def _hierarchy_contains_key(hierarchy, key) -> bool:
+    if key is None:
+        return False
+    for method_name in ("contains", "contains_element", "contains_key"):
+        method = getattr(hierarchy, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            return bool(method(key))
+        except Exception:
+            continue
+    return False
+
+
+def _hierarchy_lookup_key(hierarchy, *, name: Optional[str], kind: str):
+    unreal = _load_unreal()
+    if not name:
+        return _make_empty_rig_key(unreal)
+
+    lookup_methods = {
+        "bone": ("get_bone_key", "find_bone", "find_bone_key"),
+        "control": ("get_control_key", "find_control", "find_control_key"),
+    }
+    for method_name in lookup_methods.get(kind, ()):
+        method = getattr(hierarchy, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            key = method(name)
+            if key is not None:
+                return key
+        except Exception:
+            continue
+
+    generic_methods = ("get_key", "find_key", "get_element_key", "find_element_key")
+    element_type = _rig_element_type(unreal, kind)
+    for method_name in generic_methods:
+        method = getattr(hierarchy, method_name, None)
+        if not callable(method):
+            continue
+        call_variants = [((name,), {})]
+        if element_type is not None:
+            call_variants.extend(
+                [
+                    ((name, element_type), {}),
+                    (tuple(), {"name": name, "type": element_type}),
+                    (tuple(), {"name": name, "element_type": element_type}),
+                ]
+            )
+        for args, kwargs in call_variants:
+            try:
+                key = method(*args, **kwargs)
+                if key is not None:
+                    return key
+            except Exception:
+                continue
+
+    return _make_rig_key(unreal, name=name, kind=kind)
+
+
 def create_control_rig_asset(package_path: str, asset_name: str, skeletal_mesh_path: str) -> str:
     """Create or load a Control Rig asset bound to skeletal mesh."""
     unreal = _load_unreal()
@@ -3468,11 +3585,13 @@ def create_control_rig_asset(package_path: str, asset_name: str, skeletal_mesh_p
 
 def _add_bone_if_missing(hierarchy, parent: str, name: str, position: List[float], rotation: List[float]):
     unreal = _load_unreal()
-    element_key = hierarchy.get_bone_key(name)
-    if element_key and hierarchy.contains(element_key):
+    element_key = _hierarchy_lookup_key(hierarchy, name=name, kind="bone")
+    if _hierarchy_contains_key(hierarchy, element_key):
         return
 
-    parent_key = hierarchy.get_bone_key(parent) if parent else unreal.RigElementKey()
+    parent_key = _hierarchy_lookup_key(hierarchy, name=parent, kind="bone") if parent else _make_empty_rig_key(unreal)
+    if parent and not _hierarchy_contains_key(hierarchy, parent_key):
+        parent_key = _make_empty_rig_key(unreal)
     transform = unreal.Transform(
         location=_vector_from_list(position),
         rotation=_rotator_from_list(rotation).quaternion(),
@@ -3529,11 +3648,17 @@ def _add_bone_if_missing(hierarchy, parent: str, name: str, position: List[float
 def _add_control_if_missing(hierarchy, parent_control: Optional[str], control: Dict[str, Any]):
     unreal = _load_unreal()
     control_name = control["name"]
-    key = hierarchy.get_control_key(control_name)
-    if key and hierarchy.contains(key):
+    key = _hierarchy_lookup_key(hierarchy, name=control_name, kind="control")
+    if _hierarchy_contains_key(hierarchy, key):
         return
 
-    parent_key = hierarchy.get_control_key(parent_control) if parent_control else unreal.RigElementKey()
+    parent_key = (
+        _hierarchy_lookup_key(hierarchy, name=parent_control, kind="control")
+        if parent_control
+        else _make_empty_rig_key(unreal)
+    )
+    if parent_control and not _hierarchy_contains_key(hierarchy, parent_key):
+        parent_key = _make_empty_rig_key(unreal)
     shape_scale = control.get("scale", [1.0, 1.0, 1.0])
     control_position = control.get("position", [0.0, 0.0, 0.0])
     control_rotation = control.get("rotation", [0.0, 0.0, 0.0])
