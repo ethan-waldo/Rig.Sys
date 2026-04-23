@@ -2302,14 +2302,20 @@ def _annotate_hand_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any
         return bindings
     controls = module.get("controls", []) or []
     finger_roots = sorted(
-        control
-        for control in controls
-        if str(control.get("role", "")).startswith("hand_finger_curl")
+        (
+            control
+            for control in controls
+            if str(control.get("role", "")).startswith("hand_finger_curl")
+        ),
+        key=lambda control: str(control.get("name", "")),
     )
     thumb_roots = sorted(
-        control
-        for control in controls
-        if str(control.get("role", "")).startswith("hand_thumb_curl")
+        (
+            control
+            for control in controls
+            if str(control.get("role", "")).startswith("hand_thumb_curl")
+        ),
+        key=lambda control: str(control.get("name", "")),
     )
     root_controls = finger_roots + thumb_roots
     if not root_controls:
@@ -2335,6 +2341,43 @@ def _annotate_hand_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any
             data["hand_rate"] = rate_lookup[control_name]
         output.append(data)
     return output
+
+
+def _make_control_value(unreal) -> Optional[Any]:
+    """Build a RigControlValue across Unreal API variants."""
+    rig_control_value_cls = getattr(unreal, "RigControlValue", None)
+    if rig_control_value_cls is None:
+        return None
+
+    euler_value = None
+    euler_cls = getattr(unreal, "EulerTransform", None)
+    if callable(euler_cls):
+        try:
+            euler_value = euler_cls()
+        except Exception:
+            euler_value = None
+
+    make_euler_transform = getattr(rig_control_value_cls, "make_euler_transform", None)
+    if callable(make_euler_transform):
+        if euler_value is not None:
+            try:
+                return make_euler_transform(euler_value)
+            except Exception:
+                pass
+        try:
+            return make_euler_transform()
+        except Exception:
+            pass
+
+    try:
+        if euler_value is not None:
+            return rig_control_value_cls(euler_value)
+    except Exception:
+        pass
+    try:
+        return rig_control_value_cls()
+    except Exception:
+        return None
 
 
 def _build_module_math_model(module: Dict[str, Any]) -> Dict[str, Any]:

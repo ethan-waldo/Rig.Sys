@@ -1623,3 +1623,27 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         self.assertIn("name", kwargs)
         self.assertIn("value", kwargs)
 
+    def test_annotate_hand_bindings_sorts_controls_by_name(self):
+        from rigsys.translation.unreal_builder import _annotate_hand_bindings
+
+        module = {
+            "module_class": "Hand",
+            "controls": [
+                {"name": "B_Finger_CTRL", "role": "hand_finger_curl"},
+                {"name": "A_Finger_CTRL", "role": "hand_finger_curl"},
+                {"name": "Thumb_CTRL", "role": "hand_thumb_curl"},
+            ],
+        }
+        bindings = [
+            {"source_control": "A_Finger_CTRL"},
+            {"source_control": "B_Finger_CTRL"},
+            {"source_control": "Thumb_CTRL"},
+        ]
+
+        annotated = _annotate_hand_bindings(module, bindings)
+        rates = {entry["source_control"]: entry.get("hand_rate") for entry in annotated}
+
+        self.assertEqual(rates["A_Finger_CTRL"], 0.0)
+        self.assertLess(rates["B_Finger_CTRL"], rates["A_Finger_CTRL"])
+        self.assertLess(rates["Thumb_CTRL"], rates["B_Finger_CTRL"])
+
