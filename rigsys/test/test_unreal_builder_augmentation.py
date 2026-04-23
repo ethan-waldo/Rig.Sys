@@ -8,6 +8,7 @@ from rigsys.translation.unreal_builder import (
     augment_payload_with_generated_controls,
     apply_behavior_graph_to_control_rig,
     build_behavior_graph_plan,
+    create_control_rig_asset,
     generate_augmented_controls,
 )
 
@@ -1005,4 +1006,73 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         self.assertEqual(model_by_class["FKSegment"].get("implementation_status"), "implemented")
         self.assertEqual(model_by_class["Lips"].get("implementation_status"), "implemented")
         self.assertEqual(model_by_class["FollicleEye"].get("implementation_status"), "implemented")
+
+    def test_create_control_rig_asset_supports_single_path_factory_signature(self):
+        class _FakeSkeletalMesh:
+            def __init__(self):
+                self.skeleton = object()
+
+        class _FakeControlRigAsset:
+            def __init__(self, object_path):
+                self._object_path = object_path
+                self.preview_mesh = None
+
+            def get_path_name(self):
+                return f"{self._object_path}.{self._object_path.rsplit('/', 1)[-1]}"
+
+            def set_preview_mesh(self, mesh):
+                self.preview_mesh = mesh
+
+        class _FakeEditorAssetLibrary:
+            def __init__(self, skeletal_mesh_path):
+                self._skeletal_mesh_path = skeletal_mesh_path
+                self._skeletal_mesh = _FakeSkeletalMesh()
+                self._assets = {skeletal_mesh_path: self._skeletal_mesh}
+                self.saved = []
+
+            def does_asset_exist(self, path):
+                return path in self._assets
+
+            def delete_asset(self, path):
+                self._assets.pop(path, None)
+                return True
+
+            def load_asset(self, path):
+                return self._assets.get(path)
+
+            def save_asset(self, path, only_if_is_dirty=False):
+                self.saved.append((path, only_if_is_dirty))
+                return True
+
+            def rename_asset(self, source_path, target_path):
+                self._assets[target_path] = self._assets.pop(source_path)
+                return True
+
+        skeletal_mesh_path = "/Game/Characters/Rigs/Sanctum_Rig_SK"
+        requested_path = "/Game/Characters/Rigs/ExampleRig_ControlRig"
+        fake_editor = _FakeEditorAssetLibrary(skeletal_mesh_path=skeletal_mesh_path)
+        factory_calls = []
+
+        class _Factory:
+            @staticmethod
+            def create_new_control_rig_asset(desired_package_path):
+                factory_calls.append(desired_package_path)
+                asset = _FakeControlRigAsset(desired_package_path)
+                fake_editor._assets[desired_package_path] = asset
+                return asset
+
+        class _FakeUnreal:
+            EditorAssetLibrary = fake_editor
+            ControlRigBlueprintFactory = _Factory
+
+        with mock.patch("rigsys.translation.unreal_builder._load_unreal", return_value=_FakeUnreal):
+            result = create_control_rig_asset(
+                package_path="/Game/Characters/Rigs",
+                asset_name="ExampleRig_ControlRig",
+                skeletal_mesh_path=skeletal_mesh_path,
+            )
+
+        self.assertEqual(result, requested_path)
+        self.assertEqual(factory_calls, [requested_path])
+        self.assertEqual(fake_editor.saved[-1][0], requested_path)
 

@@ -3230,6 +3230,26 @@ def import_skeletal_mesh(fbx_file: str, destination_path: str, asset_name: Optio
     raise RuntimeError(f"No SkeletalMesh was imported from {fbx_file}; imported={task.imported_object_paths}")
 
 
+def _asset_object_path(asset: Any) -> Optional[str]:
+    """Return package asset path (/Game/Path/Asset) from a UObject."""
+    if asset is None:
+        return None
+
+    get_path_name = getattr(asset, "get_path_name", None)
+    if callable(get_path_name):
+        try:
+            object_path = str(get_path_name())
+        except Exception:
+            object_path = ""
+        if object_path:
+            return object_path.split(".", 1)[0]
+
+    raw_path_name = getattr(asset, "path_name", None)
+    if raw_path_name:
+        return str(raw_path_name).split(".", 1)[0]
+    return None
+
+
 def create_control_rig_asset(package_path: str, asset_name: str, skeletal_mesh_path: str) -> str:
     """Create or replace a Control Rig asset bound to skeletal mesh."""
     unreal = _load_unreal()
@@ -3246,15 +3266,69 @@ def create_control_rig_asset(package_path: str, asset_name: str, skeletal_mesh_p
     if skeletal_mesh is None:
         raise RuntimeError(f"Could not load skeletal mesh: {skeletal_mesh_path}")
 
-    control_rig_asset = unreal.ControlRigBlueprintFactory.create_new_control_rig_asset(
-        package_path=package,
-        asset_name=name,
-        skeleton=skeletal_mesh.skeleton,
-    )
+    factory = unreal.ControlRigBlueprintFactory
+    skeleton = getattr(skeletal_mesh, "skeleton", None)
+    control_rig_asset = None
+    last_error: Optional[Exception] = None
+
+    create_new_control_rig_asset = getattr(factory, "create_new_control_rig_asset", None)
+    if callable(create_new_control_rig_asset):
+        # Support legacy and newer Unreal Python signatures.
+        call_variants = [
+            (tuple(), {"package_path": package, "asset_name": name, "skeleton": skeleton}),
+            ((package, name, skeleton), {}),
+            ((control_rig_path,), {}),
+            ((control_rig_path, False), {}),
+        ]
+        for args, kwargs in call_variants:
+            try:
+                control_rig_asset = create_new_control_rig_asset(*args, **kwargs)
+                if control_rig_asset is not None:
+                    break
+            except Exception as exc:
+                last_error = exc
+
     if control_rig_asset is None:
+        create_from_selected = getattr(factory, "create_control_rig_from_skeletal_mesh_or_skeleton", None)
+        if callable(create_from_selected):
+            selected_candidates = [skeletal_mesh]
+            if skeleton is not None:
+                selected_candidates.append(skeleton)
+            for selected in selected_candidates:
+                for args in ((selected, False), (selected,)):
+                    try:
+                        control_rig_asset = create_from_selected(*args)
+                        if control_rig_asset is not None:
+                            break
+                    except Exception as exc:
+                        last_error = exc
+                if control_rig_asset is not None:
+                    break
+
+    if control_rig_asset is None:
+        if last_error is not None:
+            raise RuntimeError(
+                f"Failed to create Control Rig asset at {control_rig_path}: {last_error}"
+            ) from last_error
         raise RuntimeError(f"Failed to create Control Rig asset at {control_rig_path}")
 
-    control_rig_asset.set_preview_mesh(skeletal_mesh)
+    created_path = _asset_object_path(control_rig_asset)
+    if created_path and created_path != control_rig_path:
+        rename_asset = getattr(unreal.EditorAssetLibrary, "rename_asset", None)
+        if not callable(rename_asset):
+            raise RuntimeError(
+                f"Control Rig was created at {created_path}; rename API is unavailable "
+                f"for requested path {control_rig_path}"
+            )
+        if unreal.EditorAssetLibrary.does_asset_exist(control_rig_path):
+            unreal.EditorAssetLibrary.delete_asset(control_rig_path)
+        if not rename_asset(created_path, control_rig_path):
+            raise RuntimeError(f"Failed to rename Control Rig asset from {created_path} to {control_rig_path}")
+        control_rig_asset = unreal.EditorAssetLibrary.load_asset(control_rig_path) or control_rig_asset
+
+    set_preview_mesh = getattr(control_rig_asset, "set_preview_mesh", None)
+    if callable(set_preview_mesh):
+        set_preview_mesh(skeletal_mesh)
     unreal.EditorAssetLibrary.save_asset(control_rig_path, only_if_is_dirty=False)
     return control_rig_path
 
