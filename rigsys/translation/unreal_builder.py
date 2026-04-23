@@ -55,10 +55,11 @@ def _transform_from_trs(
             "rotation": rotator,
             "scale": scale_vector,
         },
+        # Some builds expose positional-only Transform constructors.
         {
             "location": location,
-            "rotation": rotator.quaternion(),
-            "scale": scale_vector,
+            "rotation": rotator,
+            "scale3d": scale_vector,
         },
     ]
     last_error: Optional[Exception] = None
@@ -3627,10 +3628,10 @@ def _add_bone_if_missing(hierarchy, parent: str, name: str, position: List[float
     parent_key = _hierarchy_lookup_key(hierarchy, name=parent, kind="bone") if parent else _make_empty_rig_key(unreal)
     if parent and not _hierarchy_contains_key(hierarchy, parent_key):
         parent_key = _make_empty_rig_key(unreal)
-    transform = unreal.Transform(
-        location=_vector_from_list(position),
-        rotation=_rotator_from_list(rotation).quaternion(),
-        scale=unreal.Vector(1.0, 1.0, 1.0),
+    transform = _transform_from_trs(
+        position=position,
+        rotation=rotation,
+        scale=[1.0, 1.0, 1.0],
     )
     hierarchy_controller = hierarchy.get_controller()
     add_bone = getattr(hierarchy_controller, "add_bone", None)
@@ -3697,10 +3698,10 @@ def _add_control_if_missing(hierarchy, parent_control: Optional[str], control: D
     shape_scale = control.get("scale", [1.0, 1.0, 1.0])
     control_position = control.get("position", [0.0, 0.0, 0.0])
     control_rotation = control.get("rotation", [0.0, 0.0, 0.0])
-    initial_transform = unreal.Transform(
-        location=_vector_from_list(control_position),
-        rotation=_rotator_from_list(control_rotation).quaternion(),
-        scale=_vector_from_list(shape_scale),
+    initial_transform = _transform_from_trs(
+        position=control_position,
+        rotation=control_rotation,
+        scale=shape_scale,
     )
     settings = unreal.RigControlSettings()
     settings.control_type = unreal.RigControlType.EULER_TRANSFORM
