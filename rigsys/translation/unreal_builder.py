@@ -73,6 +73,42 @@ def _transform_from_trs(
     raise RuntimeError("Failed to construct Unreal Transform")
 
 
+def _make_euler_control_value():
+    """Create a RigControlValue for euler transforms across Unreal versions."""
+    unreal = _load_unreal()
+    rig_control_value = getattr(unreal, "RigControlValue", None)
+    if rig_control_value is None:
+        return None
+
+    euler_transform_ctor = getattr(unreal, "EulerTransform", None)
+    euler_transform = euler_transform_ctor() if callable(euler_transform_ctor) else None
+
+    makers = [
+        "make_euler_transform",
+        "make_from_euler_transform",
+        "from_euler_transform",
+    ]
+    for maker_name in makers:
+        maker = getattr(rig_control_value, maker_name, None)
+        if not callable(maker):
+            continue
+        try:
+            return maker(euler_transform) if euler_transform is not None else maker()
+        except Exception:
+            continue
+
+    call_variants = []
+    if euler_transform is not None:
+        call_variants.append((euler_transform,))
+    call_variants.append(tuple())
+    for args in call_variants:
+        try:
+            return rig_control_value(*args)
+        except Exception:
+            continue
+    return None
+
+
 def _vec(values: Optional[Iterable[float]], default: Optional[List[float]] = None) -> List[float]:
     if values is None:
         return list(default or [0.0, 0.0, 0.0])
@@ -3713,38 +3749,72 @@ def _add_control_if_missing(hierarchy, parent_control: Optional[str], control: D
     if not callable(add_control):
         raise RuntimeError("RigHierarchyController.add_control is unavailable")
 
-    control_value = unreal.RigControlValue.make_euler_transform(unreal.EulerTransform())
-    call_variants = [
-        (
-            tuple(),
-            {
-                "name": control_name,
-                "parent": parent_key,
-                "settings": settings,
-                "value": control_value,
-                "setup_undo": True,
-                "print_python_command": False,
-            },
-        ),
-        (
-            tuple(),
-            {
-                "name": control_name,
-                "parent": parent_key,
-                "settings": settings,
-                "value": control_value,
-            },
-        ),
-        (
-            tuple(),
-            {
-                "name": control_name,
-                "parent_key": parent_key,
-                "settings": settings,
-                "value": control_value,
-            },
-        ),
-    ]
+    control_value = _make_euler_control_value()
+    call_variants = []
+    if control_value is not None:
+        call_variants.extend(
+            [
+                (
+                    tuple(),
+                    {
+                        "name": control_name,
+                        "parent": parent_key,
+                        "settings": settings,
+                        "value": control_value,
+                        "setup_undo": True,
+                        "print_python_command": False,
+                    },
+                ),
+                (
+                    tuple(),
+                    {
+                        "name": control_name,
+                        "parent": parent_key,
+                        "settings": settings,
+                        "value": control_value,
+                    },
+                ),
+                (
+                    tuple(),
+                    {
+                        "name": control_name,
+                        "parent_key": parent_key,
+                        "settings": settings,
+                        "value": control_value,
+                    },
+                ),
+            ]
+        )
+    call_variants.extend(
+        [
+            (
+                tuple(),
+                {
+                    "name": control_name,
+                    "parent": parent_key,
+                    "settings": settings,
+                    "setup_undo": True,
+                    "print_python_command": False,
+                },
+            ),
+            (
+                tuple(),
+                {
+                    "name": control_name,
+                    "parent": parent_key,
+                    "settings": settings,
+                },
+            ),
+            (
+                tuple(),
+                {
+                    "name": control_name,
+                    "parent_key": parent_key,
+                    "settings": settings,
+                },
+            ),
+        ]
+    )
     last_error: Optional[Exception] = None
     for args, kwargs in call_variants:
         try:
