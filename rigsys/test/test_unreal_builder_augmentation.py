@@ -1270,3 +1270,88 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         self.assertIn("settings", kwargs)
         self.assertIn("value", kwargs)
 
+    def test_add_control_if_missing_does_not_use_positional_fallback(self):
+        class _FakeHierarchyController:
+            def __init__(self):
+                self.calls = []
+
+            def add_control(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                if kwargs:
+                    return object()
+                raise RuntimeError("Positional add_control should not be used")
+
+        class _FakeHierarchy:
+            def __init__(self):
+                self._controller = _FakeHierarchyController()
+
+            def get_control_key(self, _name):
+                return None
+
+            def contains(self, _key):
+                return False
+
+            def get_controller(self):
+                return self._controller
+
+        class _FakeVector:
+            def __init__(self, x, y, z):
+                self.x, self.y, self.z = x, y, z
+
+        class _FakeRotator:
+            def __init__(self, rx, ry, rz):
+                self.rx, self.ry, self.rz = rx, ry, rz
+
+            def quaternion(self):
+                return object()
+
+        class _FakeTransform:
+            def __init__(self, location=None, rotation=None, scale=None):
+                self.location = location
+                self.rotation = rotation
+                self.scale = scale
+
+        class _FakeEulerTransform:
+            pass
+
+        class _FakeRigControlValue:
+            @staticmethod
+            def make_euler_transform(_value):
+                return object()
+
+        class _FakeRigControlSettings:
+            def __init__(self):
+                self.control_type = None
+                self.display_name = None
+                self.shape_name = None
+
+        class _FakeUnreal:
+            Vector = _FakeVector
+            Rotator = _FakeRotator
+            Transform = _FakeTransform
+            EulerTransform = _FakeEulerTransform
+            RigControlValue = _FakeRigControlValue
+            RigControlSettings = _FakeRigControlSettings
+
+            class RigElementKey:
+                pass
+
+            class RigControlType:
+                EULER_TRANSFORM = "euler"
+
+        hierarchy = _FakeHierarchy()
+        control = {
+            "name": "MyControl",
+            "shape": "Circle",
+            "scale": [1.0, 1.0, 1.0],
+            "position": [0.0, 0.0, 0.0],
+            "rotation": [0.0, 0.0, 0.0],
+        }
+        with mock.patch("rigsys.translation.unreal_builder._load_unreal", return_value=_FakeUnreal):
+            _add_control_if_missing(hierarchy=hierarchy, parent_control=None, control=control)
+
+        self.assertEqual(len(hierarchy.get_controller().calls), 1)
+        args, kwargs = hierarchy.get_controller().calls[0]
+        self.assertFalse(args)
+        self.assertIn("name", kwargs)
+

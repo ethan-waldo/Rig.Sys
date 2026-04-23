@@ -3119,9 +3119,6 @@ def _controller_add_unit_node(controller, node_spec: Dict[str, Any]) -> Any:
                 "node_name": node_name,
             },
         ),
-        ((struct_path, method_name, position, node_name, True, False), {}),
-        ((struct_path, method_name, position, node_name, True), {}),
-        ((struct_path, method_name, position, node_name), {}),
     ]
     last_error: Optional[Exception] = None
     for args, kwargs in call_variants:
@@ -3139,14 +3136,41 @@ def _controller_set_pin_default(controller, pin_path: str, value: str) -> bool:
     if not callable(setter):
         return False
     call_variants = [
-        (pin_path, value, True, True, False),
-        (pin_path, value, True, True),
-        (pin_path, value, True),
-        (pin_path, value),
+        (
+            tuple(),
+            {
+                "pin_path": pin_path,
+                "default_value": value,
+                "setup_undo_redo": True,
+                "print_python_command": False,
+            },
+        ),
+        (
+            tuple(),
+            {
+                "pin_path": pin_path,
+                "default_value": value,
+                "setup_undo_redo": True,
+            },
+        ),
+        (
+            tuple(),
+            {
+                "pin_path": pin_path,
+                "default_value": value,
+            },
+        ),
+        (
+            tuple(),
+            {
+                "pin_path": pin_path,
+                "value": value,
+            },
+        ),
     ]
-    for args in call_variants:
+    for args, kwargs in call_variants:
         try:
-            setter(*args)
+            setter(*args, **kwargs)
             return True
         except Exception:
             continue
@@ -3176,13 +3200,41 @@ def _controller_add_link(controller, source: str, target: str) -> bool:
     if not callable(add_link):
         return False
     call_variants = [
-        (source, target, True, False),
-        (source, target, True),
-        (source, target),
+        (
+            tuple(),
+            {
+                "source_pin_path": source,
+                "target_pin_path": target,
+                "setup_undo_redo": True,
+                "print_python_command": False,
+            },
+        ),
+        (
+            tuple(),
+            {
+                "source_pin_path": source,
+                "target_pin_path": target,
+                "setup_undo_redo": True,
+            },
+        ),
+        (
+            tuple(),
+            {
+                "source_pin_path": source,
+                "target_pin_path": target,
+            },
+        ),
+        (
+            tuple(),
+            {
+                "source": source,
+                "target": target,
+            },
+        ),
     ]
-    for args in call_variants:
+    for args, kwargs in call_variants:
         try:
-            result = add_link(*args)
+            result = add_link(*args, **kwargs)
             return bool(result) if result is not None else True
         except Exception:
             continue
@@ -3462,7 +3514,6 @@ def _add_bone_if_missing(hierarchy, parent: str, name: str, position: List[float
                 "transform_in_global": True,
             },
         ),
-        ((name, parent_key, transform, True), {}),
     ]
     last_error: Optional[Exception] = None
     for args, kwargs in call_variants:
@@ -3532,8 +3583,6 @@ def _add_control_if_missing(hierarchy, parent_control: Optional[str], control: D
                 "value": control_value,
             },
         ),
-        ((control_name, parent_key, settings, control_value, True, False), {}),
-        ((control_name, parent_key, settings, control_value), {}),
     ]
     last_error: Optional[Exception] = None
     for args, kwargs in call_variants:
@@ -3554,12 +3603,18 @@ def _add_control_if_missing(hierarchy, parent_control: Optional[str], control: D
 def build_control_rig_from_payload(
     control_rig_path: str,
     translated_payload: Dict[str, Any],
+    *,
+    build_behavior_graph: bool = True,
 ) -> str:
     """Create hierarchy controls and bones from translated Maya payload."""
     unreal = _load_unreal()
     control_rig = unreal.EditorAssetLibrary.load_asset(control_rig_path)
     if control_rig is None:
         raise RuntimeError(f"Could not load Control Rig asset: {control_rig_path}")
+
+    logger = getattr(unreal, "log", None)
+    if callable(logger):
+        logger(f"[rigsys] Building Control Rig payload into {control_rig_path}")
 
     hierarchy = control_rig.hierarchy
 
@@ -3616,10 +3671,23 @@ def build_control_rig_from_payload(
                                 break
             _add_control_if_missing(hierarchy=hierarchy, parent_control=declared_parent, control=control)
 
-    apply_behavior_graph_to_control_rig(control_rig=control_rig, translated_payload=materialized_payload)
+    if build_behavior_graph:
+        graph_result = apply_behavior_graph_to_control_rig(control_rig=control_rig, translated_payload=materialized_payload)
+        if callable(logger):
+            logger(
+                "[rigsys] Graph build result: "
+                f"nodes={graph_result.get('nodes_added', 0)} "
+                f"links={graph_result.get('links_added', 0)} "
+                f"defaults={graph_result.get('defaults_set', 0)} "
+                f"warnings={len(graph_result.get('warnings', []))}"
+            )
+    elif callable(logger):
+        logger("[rigsys] Skipping behavior graph build (build_behavior_graph=False)")
 
     control_rig.request_auto_vm_recompilation()
     unreal.EditorAssetLibrary.save_asset(control_rig_path, only_if_is_dirty=False)
+    if callable(logger):
+        logger(f"[rigsys] Finished building Control Rig {control_rig_path}")
     return control_rig_path
 
 
@@ -3636,6 +3704,7 @@ def import_model_and_build_control_rig(
     model_fbx_path: str,
     destination_path: str = "/Game/AutoRig",
     control_rig_name: Optional[str] = None,
+    build_behavior_graph: bool = True,
 ) -> Dict[str, str]:
     """Import model FBX and auto-build control rig from translated payload."""
     payload = load_payload_from_json(payload_json_path)
@@ -3655,6 +3724,7 @@ def import_model_and_build_control_rig(
     build_control_rig_from_payload(
         control_rig_path=control_rig_path,
         translated_payload=payload,
+        build_behavior_graph=build_behavior_graph,
     )
 
     return {
