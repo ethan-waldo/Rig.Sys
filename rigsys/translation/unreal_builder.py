@@ -556,6 +556,7 @@ def _add_segment_driver_controls(module: Dict[str, Any], proxy_map: Dict[str, Di
     end_rot = _vec(end_proxy.get("rotation"))
     output = []
     parent = None
+    end_proxy_name = str(end_proxy.get("name") or "End")
     for idx in range(count):
         alpha = 0.0 if count == 1 else float(idx) / float(count - 1)
         name = f"{module['module_name']}_SegmentDriver_{idx}_CTRL"
@@ -568,6 +569,7 @@ def _add_segment_driver_controls(module: Dict[str, Any], proxy_map: Dict[str, Di
                 position=_vec_lerp(start_pos, end_pos, alpha),
                 rotation=_vec_lerp(start_rot, end_rot, alpha),
                 parent_control=parent,
+                driven_proxy=end_proxy_name,
                 metadata={"segment_index": idx},
             )
         )
@@ -912,6 +914,8 @@ def _add_lips_segment_controls(module: Dict[str, Any], proxy_map: Dict[str, Dict
     base_scale = _vec(settings.get("ctrl_scale"), [1.0, 1.0, 1.0])
 
     output = []
+    upper_proxy_name = str(upper_center.get("name") if upper_center else "Mouth")
+    lower_proxy_name = str(lower_center.get("name") if lower_center else "Mouth")
     for idx in range(segment_count):
         alpha = float(idx + 1) / float(segment_count + 1)
         base = _vec_lerp(left_pos, right_pos, alpha)
@@ -923,6 +927,8 @@ def _add_lips_segment_controls(module: Dict[str, Any], proxy_map: Dict[str, Dict
                 scale=_vec_scale(base_scale, 0.7),
                 position=_vec_add(base, up_offset),
                 rotation=[0.0, 0.0, 0.0],
+                driven_proxy=upper_proxy_name,
+                parent_proxy=str(mouth.get("name") or "Mouth"),
                 metadata={"segment_index": idx},
             )
         )
@@ -934,6 +940,8 @@ def _add_lips_segment_controls(module: Dict[str, Any], proxy_map: Dict[str, Dict
                 scale=_vec_scale(base_scale, 0.7),
                 position=_vec_add(base, lo_offset),
                 rotation=[0.0, 0.0, 0.0],
+                driven_proxy=lower_proxy_name,
+                parent_proxy=str(mouth.get("name") or "Mouth"),
                 metadata={"segment_index": idx},
             )
         )
@@ -977,6 +985,7 @@ def _add_follicle_eye_segment_controls(module: Dict[str, Any], proxy_map: Dict[s
     base_scale = _vec(settings.get("ctrl_scale"), [1.0, 1.0, 1.0])
 
     output = []
+    eye_proxy_name = str(eye_center.get("name") or "Eyeball")
     for idx in range(segment_count):
         alpha = float(idx + 1) / float(segment_count + 1)
         base = _vec_lerp(inner_pos, outer_pos, alpha)
@@ -988,6 +997,8 @@ def _add_follicle_eye_segment_controls(module: Dict[str, Any], proxy_map: Dict[s
                 scale=_vec_scale(base_scale, 0.65),
                 position=_vec_add(base, upper_offset),
                 rotation=[0.0, 0.0, 0.0],
+                driven_proxy=eye_proxy_name,
+                parent_proxy=eye_proxy_name,
                 metadata={"segment_index": idx},
             )
         )
@@ -999,6 +1010,8 @@ def _add_follicle_eye_segment_controls(module: Dict[str, Any], proxy_map: Dict[s
                 scale=_vec_scale(base_scale, 0.65),
                 position=_vec_add(base, lower_offset),
                 rotation=[0.0, 0.0, 0.0],
+                driven_proxy=eye_proxy_name,
+                parent_proxy=eye_proxy_name,
                 metadata={"segment_index": idx},
             )
         )
@@ -1571,10 +1584,305 @@ def _ribbon_bind_operator_bindings(module: Dict[str, Any], bindings: List[Dict[s
         data["ribbon_alpha"] = alpha
         data["ribbon_start_control"] = start_control
         data["ribbon_end_control"] = end_control
+        data["distribution_operator"] = True
+        data["distribution_alpha"] = alpha
+        data["distribution_start_control"] = start_control
+        data["distribution_end_control"] = end_control
+        data["distribution_tag"] = "Ribbon"
         data["target_channel"] = "translation"
         data["math_mode"] = "ribbon_bind_distribution_operator"
         output.append(data)
     return output
+
+
+def _fk_distribution_operator_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    module_class = str(module.get("module_class") or "")
+    if module_class not in {"FK", "FKSegment"}:
+        return bindings
+
+    controls = module.get("controls", []) or []
+    settings = module.get("module_settings", {}) or {}
+    by_name = {str(control.get("name")): control for control in controls if control.get("name")}
+    start_control = next((control.get("name") for control in controls if control.get("driven_proxy") == "Start"), None)
+    end_control = next((control.get("name") for control in controls if control.get("driven_proxy") == "End"), None)
+    if not start_control:
+        start_control = next((control.get("name") for control in controls if control.get("role") == "segment_driver"), None)
+    if not end_control:
+        segment_controls = [control for control in controls if control.get("role") == "segment_driver" and control.get("name")]
+        segment_controls.sort(key=lambda control: int((control.get("metadata") or {}).get("segment_index", 0)))
+        if segment_controls:
+            end_control = segment_controls[-1].get("name")
+
+    segment_count = int(settings.get("segments") or 0)
+    rail_controls = [control for control in controls if control.get("role") == "ik_rail_driver" and control.get("name")]
+    rail_controls.sort(key=lambda control: int((control.get("metadata") or {}).get("rail_index", 0)))
+    rail_count = len(rail_controls)
+    rail_start = str(rail_controls[0].get("name")) if rail_controls else None
+    rail_end = str(rail_controls[-1].get("name")) if rail_controls else None
+
+    output: List[Dict[str, Any]] = []
+    for binding in bindings:
+        role = str(binding.get("source_role", ""))
+        if role not in {"segment_driver", "ik_rail_driver"}:
+            output.append(binding)
+            continue
+        data = dict(binding)
+        source_name = str(binding.get("source_control", ""))
+        source_control = by_name.get(source_name, {})
+        source_meta = source_control.get("metadata") or {}
+
+        if role == "segment_driver" and start_control and end_control:
+            segment_index = int(source_meta.get("segment_index", 0))
+            denominator = max(segment_count - 1, 1)
+            alpha = float(segment_index) / float(denominator)
+            data["distribution_operator"] = True
+            data["distribution_alpha"] = alpha
+            data["distribution_start_control"] = str(start_control)
+            data["distribution_end_control"] = str(end_control)
+            data["distribution_tag"] = "FKSegment"
+            data["target_channel"] = "translation"
+            data["math_mode"] = "fk_segment_distribution_operator"
+        elif role == "ik_rail_driver" and rail_start and rail_end:
+            rail_index = int(source_meta.get("rail_index", 0))
+            denominator = max(rail_count - 1, 1)
+            alpha = float(rail_index) / float(denominator)
+            data["distribution_operator"] = True
+            data["distribution_alpha"] = alpha
+            data["distribution_start_control"] = str(rail_start)
+            data["distribution_end_control"] = str(rail_end)
+            data["distribution_tag"] = "IKRail"
+            data["target_channel"] = "translation"
+            data["math_mode"] = "fksegment_ik_rail_distribution_operator"
+        output.append(data)
+    return output
+
+
+def _lips_operator_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if module.get("module_class") != "Lips":
+        return bindings
+    controls = module.get("controls", []) or []
+    settings = module.get("module_settings", {}) or {}
+    by_name = {str(control.get("name")): control for control in controls if control.get("name")}
+    corners = [control for control in controls if control.get("role") == "lip_corner" and control.get("name")]
+    if not corners:
+        corners = [
+            control
+            for control in controls
+            if str(control.get("driven_proxy") or "").lower().endswith("cornerlip") and control.get("name")
+        ]
+    left_corner = next((control.get("name") for control in corners if "_L_" in str(control.get("name"))), None)
+    right_corner = next((control.get("name") for control in corners if "_R_" in str(control.get("name"))), None)
+    if not left_corner and corners:
+        left_corner = corners[0].get("name")
+    if not right_corner and len(corners) > 1:
+        right_corner = corners[-1].get("name")
+    upper_segments = [control for control in controls if control.get("role") == "lip_segment_upper" and control.get("name")]
+    lower_segments = [control for control in controls if control.get("role") == "lip_segment_lower" and control.get("name")]
+    upper_segments.sort(key=lambda control: int((control.get("metadata") or {}).get("segment_index", 0)))
+    lower_segments.sort(key=lambda control: int((control.get("metadata") or {}).get("segment_index", 0)))
+    role_endpoints = {
+        "lip_segment_upper": {
+            "start": str(upper_segments[0].get("name")) if upper_segments else None,
+            "end": str(upper_segments[-1].get("name")) if upper_segments else None,
+        },
+        "lip_segment_lower": {
+            "start": str(lower_segments[0].get("name")) if lower_segments else None,
+            "end": str(lower_segments[-1].get("name")) if lower_segments else None,
+        },
+    }
+    segment_count = int(settings.get("lip_segments") or 0)
+
+    output: List[Dict[str, Any]] = []
+    for binding in bindings:
+        role = str(binding.get("source_role", ""))
+        if role not in {"lip_segment_upper", "lip_segment_lower"}:
+            output.append(binding)
+            continue
+        endpoints = role_endpoints.get(role, {})
+        start_control = endpoints.get("start") or left_corner
+        end_control = endpoints.get("end") or right_corner
+        if not start_control or not end_control:
+            output.append(binding)
+            continue
+        data = dict(binding)
+        source_control = by_name.get(str(binding.get("source_control", "")), {})
+        source_meta = source_control.get("metadata") or {}
+        segment_index = int(source_meta.get("segment_index", 0))
+        alpha = float(segment_index + 1) / float(max(segment_count + 1, 1))
+        data["distribution_operator"] = True
+        data["distribution_alpha"] = alpha
+        data["distribution_start_control"] = str(start_control)
+        data["distribution_end_control"] = str(end_control)
+        data["distribution_tag"] = "LipsUpper" if role.endswith("upper") else "LipsLower"
+        data["target_channel"] = "translation"
+        data["math_mode"] = f"lips_{role}_distribution_operator"
+        output.append(data)
+    return output
+
+
+def _follicle_eye_operator_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if module.get("module_class") != "FollicleEye":
+        return bindings
+    controls = module.get("controls", []) or []
+    settings = module.get("module_settings", {}) or {}
+    by_name = {str(control.get("name")): control for control in controls if control.get("name")}
+    corners = [control for control in controls if control.get("role") == "lid_corner" and control.get("name")]
+    if not corners:
+        corners = [
+            control
+            for control in controls
+            if str(control.get("driven_proxy") or "") in {"In", "Out"} and control.get("name")
+        ]
+    inner_corner = next((control.get("name") for control in corners if "_In_" in str(control.get("name"))), None)
+    outer_corner = next((control.get("name") for control in corners if "_Out_" in str(control.get("name"))), None)
+    if not inner_corner and corners:
+        inner_corner = corners[0].get("name")
+    if not outer_corner and len(corners) > 1:
+        outer_corner = corners[-1].get("name")
+    upper_segments = [control for control in controls if control.get("role") == "lid_segment_upper" and control.get("name")]
+    lower_segments = [control for control in controls if control.get("role") == "lid_segment_lower" and control.get("name")]
+    upper_segments.sort(key=lambda control: int((control.get("metadata") or {}).get("segment_index", 0)))
+    lower_segments.sort(key=lambda control: int((control.get("metadata") or {}).get("segment_index", 0)))
+    role_endpoints = {
+        "lid_segment_upper": {
+            "start": str(upper_segments[0].get("name")) if upper_segments else None,
+            "end": str(upper_segments[-1].get("name")) if upper_segments else None,
+        },
+        "lid_segment_lower": {
+            "start": str(lower_segments[0].get("name")) if lower_segments else None,
+            "end": str(lower_segments[-1].get("name")) if lower_segments else None,
+        },
+    }
+    segment_count = int(settings.get("lid_segments") or 0)
+
+    output: List[Dict[str, Any]] = []
+    for binding in bindings:
+        role = str(binding.get("source_role", ""))
+        if role not in {"lid_segment_upper", "lid_segment_lower"}:
+            output.append(binding)
+            continue
+        endpoints = role_endpoints.get(role, {})
+        start_control = endpoints.get("start") or inner_corner
+        end_control = endpoints.get("end") or outer_corner
+        if not start_control or not end_control:
+            output.append(binding)
+            continue
+        data = dict(binding)
+        source_control = by_name.get(str(binding.get("source_control", "")), {})
+        source_meta = source_control.get("metadata") or {}
+        segment_index = int(source_meta.get("segment_index", 0))
+        alpha = float(segment_index + 1) / float(max(segment_count + 1, 1))
+        data["distribution_operator"] = True
+        data["distribution_alpha"] = alpha
+        data["distribution_start_control"] = str(start_control)
+        data["distribution_end_control"] = str(end_control)
+        data["distribution_tag"] = "LidUpper" if role.endswith("upper") else "LidLower"
+        data["target_channel"] = "translation"
+        data["math_mode"] = f"follicle_eye_{role}_distribution_operator"
+        output.append(data)
+    return output
+
+
+def _ensure_distribution_bindings(module: Dict[str, Any], bindings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    module_class = str(module.get("module_class") or "")
+    controls = module.get("controls", []) or []
+    if module_class == "FK":
+        segment_controls = [control for control in controls if control.get("role") == "segment_driver" and control.get("name")]
+        segment_controls.sort(key=lambda control: int((control.get("metadata") or {}).get("segment_index", 0)))
+        if segment_controls:
+            start_control = str(segment_controls[0].get("name"))
+            end_control = str(segment_controls[-1].get("name"))
+            segment_count = len(segment_controls)
+            for idx, control in enumerate(segment_controls):
+                alpha = float(idx) / float(max(segment_count - 1, 1))
+                bindings.append(
+                    {
+                        "source_control": str(control.get("name")),
+                        "source_role": "segment_driver",
+                        "target_item_type": "Control",
+                        "target_item_name": str(control.get("name")),
+                        "weight": 1.0,
+                        "source_space": "GlobalSpace",
+                        "target_space": "GlobalSpace",
+                        "distribution_operator": True,
+                        "distribution_alpha": alpha,
+                        "distribution_start_control": start_control,
+                        "distribution_end_control": end_control,
+                        "distribution_tag": "FKSegment",
+                        "target_channel": "translation",
+                        "math_mode": "fk_segment_distribution_operator",
+                        "tag": "distribution_operator",
+                    }
+                )
+        return bindings
+
+    if module_class == "Lips":
+        upper = [control for control in controls if control.get("role") == "lip_segment_upper" and control.get("name")]
+        lower = [control for control in controls if control.get("role") == "lip_segment_lower" and control.get("name")]
+        corners = [control for control in controls if control.get("role") == "lip_corner" and control.get("name")]
+        if corners:
+            left_corner = str(corners[0].get("name"))
+            right_corner = str(corners[-1].get("name"))
+            for group, tag in ((upper, "LipsUpper"), (lower, "LipsLower")):
+                group.sort(key=lambda control: int((control.get("metadata") or {}).get("segment_index", 0)))
+                segment_count = len(group)
+                for idx, control in enumerate(group):
+                    alpha = float(idx + 1) / float(max(segment_count + 1, 1))
+                    bindings.append(
+                        {
+                            "source_control": str(control.get("name")),
+                            "source_role": str(control.get("role")),
+                            "target_item_type": "Control",
+                            "target_item_name": str(control.get("name")),
+                            "weight": 1.0,
+                            "source_space": "GlobalSpace",
+                            "target_space": "GlobalSpace",
+                            "distribution_operator": True,
+                            "distribution_alpha": alpha,
+                            "distribution_start_control": left_corner,
+                            "distribution_end_control": right_corner,
+                            "distribution_tag": tag,
+                            "target_channel": "translation",
+                            "math_mode": f"lips_{str(control.get('role'))}_distribution_operator",
+                            "tag": "distribution_operator",
+                        }
+                    )
+        return bindings
+
+    if module_class == "FollicleEye":
+        upper = [control for control in controls if control.get("role") == "lid_segment_upper" and control.get("name")]
+        lower = [control for control in controls if control.get("role") == "lid_segment_lower" and control.get("name")]
+        corners = [control for control in controls if control.get("role") == "lid_corner" and control.get("name")]
+        if corners:
+            inner_corner = str(corners[0].get("name"))
+            outer_corner = str(corners[-1].get("name"))
+            for group, tag in ((upper, "LidUpper"), (lower, "LidLower")):
+                group.sort(key=lambda control: int((control.get("metadata") or {}).get("segment_index", 0)))
+                segment_count = len(group)
+                for idx, control in enumerate(group):
+                    alpha = float(idx + 1) / float(max(segment_count + 1, 1))
+                    bindings.append(
+                        {
+                            "source_control": str(control.get("name")),
+                            "source_role": str(control.get("role")),
+                            "target_item_type": "Control",
+                            "target_item_name": str(control.get("name")),
+                            "weight": 1.0,
+                            "source_space": "GlobalSpace",
+                            "target_space": "GlobalSpace",
+                            "distribution_operator": True,
+                            "distribution_alpha": alpha,
+                            "distribution_start_control": inner_corner,
+                            "distribution_end_control": outer_corner,
+                            "distribution_tag": tag,
+                            "target_channel": "translation",
+                            "math_mode": f"follicle_eye_{str(control.get('role'))}_distribution_operator",
+                            "tag": "distribution_operator",
+                        }
+                    )
+        return bindings
+
+    return bindings
 
 
 def _limb_foot_roll_operator_nodes(
@@ -1737,20 +2045,21 @@ def _ribbon_bind_operator_nodes(
 ) -> Dict[str, Any]:
     if stage_name != "forward":
         return {"nodes": [], "links": []}
-    if not bool(binding.get("ribbon_distribution_operator")):
+    if not bool(binding.get("distribution_operator") or binding.get("ribbon_distribution_operator")):
         return {"nodes": [], "links": []}
 
-    alpha = float(binding.get("ribbon_alpha", 0.0))
-    start_control = str(binding.get("ribbon_start_control") or "")
-    end_control = str(binding.get("ribbon_end_control") or "")
+    alpha = float(binding.get("distribution_alpha", binding.get("ribbon_alpha", 0.0)))
+    start_control = str(binding.get("distribution_start_control") or binding.get("ribbon_start_control") or "")
+    end_control = str(binding.get("distribution_end_control") or binding.get("ribbon_end_control") or "")
+    tag = re.sub(r"[^A-Za-z0-9_]", "", str(binding.get("distribution_tag") or "Ribbon")) or "Ribbon"
     if not start_control or not end_control:
         return {"nodes": [], "links": []}
 
-    start_get = f"{graph_module_name}_{stage_tag}_RibbonStart_{index}"
-    end_get = f"{graph_module_name}_{stage_tag}_RibbonEnd_{index}"
-    delta = f"{graph_module_name}_{stage_tag}_RibbonDelta_{index}"
-    alpha_mul = f"{graph_module_name}_{stage_tag}_RibbonAlphaMul_{index}"
-    result_add = f"{graph_module_name}_{stage_tag}_RibbonResult_{index}"
+    start_get = f"{graph_module_name}_{stage_tag}_{tag}Start_{index}"
+    end_get = f"{graph_module_name}_{stage_tag}_{tag}End_{index}"
+    delta = f"{graph_module_name}_{stage_tag}_{tag}Delta_{index}"
+    alpha_mul = f"{graph_module_name}_{stage_tag}_{tag}AlphaMul_{index}"
+    result_add = f"{graph_module_name}_{stage_tag}_{tag}Result_{index}"
     nodes = [
         {
             "name": start_get,
@@ -1784,9 +2093,108 @@ def _ribbon_bind_operator_nodes(
         },
     ]
 
-    _add_pin_default(set_defaults, pin_path=f"{start_get}.Control", value=start_control)
+    _add_pin_default(
+        set_defaults,
+        pin_path=f"{start_get}.Control",
+        pin_path_candidates=[f"{start_get}.ControlFloat", f"{start_get}.Name"],
+        value=start_control,
+    )
     _add_pin_default(set_defaults, pin_path=f"{start_get}.Space", value="GlobalSpace")
-    _add_pin_default(set_defaults, pin_path=f"{end_get}.Control", value=end_control)
+    _add_pin_default(
+        set_defaults,
+        pin_path=f"{end_get}.Control",
+        pin_path_candidates=[f"{end_get}.ControlFloat", f"{end_get}.Name"],
+        value=end_control,
+    )
+    _add_pin_default(set_defaults, pin_path=f"{end_get}.Space", value="GlobalSpace")
+    _add_pin_default(set_defaults, pin_path=f"{alpha_mul}.B", value=str(alpha))
+
+    links = [
+        {"source": f"{end_get}.Transform.Translation", "target": f"{delta}.A", "stage": stage_name},
+        {"source": f"{start_get}.Transform.Translation", "target": f"{delta}.B", "stage": stage_name},
+        {"source": f"{delta}.Result", "target": f"{alpha_mul}.A", "stage": stage_name},
+        {"source": f"{alpha_mul}.Result", "target": f"{result_add}.A", "stage": stage_name},
+        {"source": f"{start_get}.Transform.Translation", "target": f"{result_add}.B", "stage": stage_name},
+        {"source": f"{result_add}.Result", "target": f"{set_node}.Value", "stage": stage_name},
+    ]
+    return {"nodes": nodes, "links": links}
+
+
+def _generic_distribution_operator_nodes(
+    *,
+    stage_name: str,
+    graph_module_name: str,
+    stage_tag: str,
+    index: int,
+    binding: Dict[str, Any],
+    base_x: float,
+    stage_y: float,
+    set_node: str,
+    set_defaults: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if stage_name != "forward":
+        return {"nodes": [], "links": []}
+    if not bool(binding.get("distribution_operator")):
+        return {"nodes": [], "links": []}
+
+    alpha = float(binding.get("distribution_alpha", 0.0))
+    start_control = str(binding.get("distribution_start_control") or "")
+    end_control = str(binding.get("distribution_end_control") or "")
+    tag = str(binding.get("distribution_tag") or "Generic")
+    if not start_control or not end_control:
+        return {"nodes": [], "links": []}
+
+    start_get = f"{graph_module_name}_{stage_tag}_{tag}Start_{index}"
+    end_get = f"{graph_module_name}_{stage_tag}_{tag}End_{index}"
+    delta = f"{graph_module_name}_{stage_tag}_{tag}Delta_{index}"
+    alpha_mul = f"{graph_module_name}_{stage_tag}_{tag}AlphaMul_{index}"
+    result_add = f"{graph_module_name}_{stage_tag}_{tag}Result_{index}"
+    nodes = [
+        {
+            "name": start_get,
+            "struct_path": "/Script/ControlRig.RigUnit_GetControlTransform",
+            "method_name": "Execute",
+            "position": [base_x + 110.0, stage_y + 360.0],
+        },
+        {
+            "name": end_get,
+            "struct_path": "/Script/ControlRig.RigUnit_GetControlTransform",
+            "method_name": "Execute",
+            "position": [base_x + 110.0, stage_y + 440.0],
+        },
+        {
+            "name": delta,
+            "struct_path": "/Script/RigVM.RigVMFunction_MathVectorSub",
+            "method_name": "Execute",
+            "position": [base_x + 300.0, stage_y + 400.0],
+        },
+        {
+            "name": alpha_mul,
+            "struct_path": "/Script/RigVM.RigVMFunction_MathVectorMul",
+            "method_name": "Execute",
+            "position": [base_x + 490.0, stage_y + 400.0],
+        },
+        {
+            "name": result_add,
+            "struct_path": "/Script/RigVM.RigVMFunction_MathVectorAdd",
+            "method_name": "Execute",
+            "position": [base_x + 680.0, stage_y + 400.0],
+        },
+    ]
+
+    _add_pin_default(
+        set_defaults,
+        pin_path=f"{start_get}.Control",
+        pin_path_candidates=[f"{start_get}.ControlFloat", f"{start_get}.Name"],
+        value=start_control,
+    )
+    _add_pin_default(set_defaults, pin_path=f"{start_get}.Space", value="GlobalSpace")
+    _add_pin_default(
+        set_defaults,
+        pin_path=f"{end_get}.Control",
+        pin_path_candidates=[f"{end_get}.ControlFloat", f"{end_get}.Name"],
+        value=end_control,
+    )
     _add_pin_default(set_defaults, pin_path=f"{end_get}.Space", value="GlobalSpace")
     _add_pin_default(set_defaults, pin_path=f"{alpha_mul}.B", value=str(alpha))
 
@@ -1946,6 +2354,100 @@ def _build_module_math_model(module: Dict[str, Any]) -> Dict[str, Any]:
         )
         implemented.append("ribbon_bind_and_reverse_control_mapping")
         implemented.append("ribbon_bind_distribution_operator_network")
+
+    if module_class == "Root":
+        equations.append(
+            {
+                "id": "root_direct_mapping",
+                "expression": "root/base proxies follow root controls in staged global mapping.",
+                "source": "Root control and optional offset control mapping",
+            }
+        )
+        implemented.append("root_transform_mapping")
+        if bool(settings.get("add_offset", False)):
+            implemented.append("root_offset_chain_mapping")
+
+    if module_class == "FK":
+        equations.append(
+            {
+                "id": "fk_chain_mapping",
+                "expression": "fk_joint_i follows fk_control_i transform across solve stages.",
+                "source": "FK proxy/control staged mapping",
+            }
+        )
+        implemented.append("fk_chain_transform_mapping")
+        if int(settings.get("segments") or 0) > 0:
+            implemented.append("fk_segment_driver_distribution_operator_network")
+
+    if module_class == "FKSegment":
+        equations.append(
+            {
+                "id": "fksegment_chain_mapping",
+                "expression": "segment chain follows fk controls; optional reverse and rail controls remap distribution.",
+                "source": "FKSegment controls, reverse chain, IK rail controls",
+            }
+        )
+        implemented.append("fksegment_chain_transform_mapping")
+        if bool(settings.get("reverse", False)):
+            implemented.append("fksegment_reverse_chain_mapping")
+        if bool(settings.get("ik_rail", False)):
+            implemented.append("fksegment_ik_rail_distribution_operator_network")
+
+    if module_class == "Lips":
+        equations.append(
+            {
+                "id": "lips_corner_segment_distribution",
+                "expression": "lip_segment_i = lerp(left_corner, right_corner, alpha_i) + upper/lower offsets",
+                "source": "Lips segment controls and center offset references",
+            }
+        )
+        implemented.append("lips_segment_distribution_operator_network")
+        if bool(settings.get("jaw_target")):
+            implemented.append("lips_jaw_follow_control_mapping")
+
+    if module_class == "FollicleEye":
+        equations.append(
+            {
+                "id": "follicle_eye_lid_distribution",
+                "expression": "lid_segment_i = lerp(inner_corner, outer_corner, alpha_i) + upper/lower lid offsets",
+                "source": "FollicleEye lid segment controls",
+            }
+        )
+        implemented.append("follicle_eye_segment_distribution_operator_network")
+        if bool(settings.get("eyeball", False)):
+            implemented.append("follicle_eye_eyeball_aim_mapping")
+        if settings.get("follicle_surface") or settings.get("follicle_mesh"):
+            implemented.append("follicle_eye_attachment_control_mapping")
+
+    if module_class == "IK":
+        equations.append(
+            {
+                "id": "ik_placeholder_mapping",
+                "expression": "ik controls map directly to driven proxies where present",
+                "source": "IK translator fallback mapping",
+            }
+        )
+        implemented.append("ik_placeholder_transform_mapping")
+
+    if module_class == "Floating":
+        equations.append(
+            {
+                "id": "floating_placeholder_mapping",
+                "expression": "floating controls map directly to driven proxies where present",
+                "source": "Floating translator fallback mapping",
+            }
+        )
+        implemented.append("floating_placeholder_transform_mapping")
+
+    if module_class == "TestMotionModule":
+        equations.append(
+            {
+                "id": "test_motion_mapping",
+                "expression": "test motion controls map directly to expected proxy chain for validation.",
+                "source": "TestMotionModule translator mapping",
+            }
+        )
+        implemented.append("test_motion_module_transform_mapping")
 
     implementation_status = "implemented" if not approximations else "approximate"
     if not equations and not implemented and not approximations:
@@ -2290,6 +2792,20 @@ def _make_stage_nodes_for_binding(
     extra_nodes.extend(ribbon_ops["nodes"])
     extra_links.extend(ribbon_ops["links"])
 
+    distribution_ops = _generic_distribution_operator_nodes(
+        stage_name=stage_name,
+        graph_module_name=graph_module_name,
+        stage_tag=stage_tag,
+        index=index,
+        binding=binding,
+        base_x=base_x,
+        stage_y=stage_y,
+        set_node=set_node,
+        set_defaults=set_defaults,
+    )
+    extra_nodes.extend(distribution_ops["nodes"])
+    extra_links.extend(distribution_ops["links"])
+
     links: List[Dict[str, Any]] = []
     if transform_source_pin:
         links.append({"source": transform_source_pin, "target": f"{set_node}.Value", "stage": stage_name})
@@ -2356,6 +2872,14 @@ def build_module_behavior_graph_plan(module: Dict[str, Any]) -> Dict[str, Any]:
         bindings = _hand_operator_bindings(module, bindings)
     if module_class == "RibbonBindIK":
         bindings = _ribbon_bind_operator_bindings(module, bindings)
+    if module_class in {"IK", "Floating", "TestMotionModule"}:
+        bindings = _direct_drive_operator_bindings(module, bindings)
+    if module_class in {"FK", "FKSegment"}:
+        bindings = _fk_distribution_operator_bindings(module, bindings)
+    if module_class == "Lips":
+        bindings = _lips_operator_bindings(module, bindings)
+    if module_class == "FollicleEye":
+        bindings = _follicle_eye_operator_bindings(module, bindings)
     if module_class in {"Limb", "QuadLimb"}:
         bindings = _limb_ik_fk_bindings(module, bindings)
         bindings = _limb_foot_roll_operator_bindings(module, bindings)

@@ -1,9 +1,12 @@
 """Unit tests for Unreal-side control augmentation logic."""
 
 import unittest
+from unittest import mock
 
 from rigsys.translation.unreal_builder import (
+    _build_module_math_model,
     augment_payload_with_generated_controls,
+    apply_behavior_graph_to_control_rig,
     build_behavior_graph_plan,
     generate_augmented_controls,
 )
@@ -858,4 +861,148 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
 
         limb_model = next(model for model in plan["math_models"] if model.get("module_class") == "Limb")
         self.assertTrue(any(eq.get("id") == "ik_fk_visibility_reverse" for eq in limb_model.get("equations", [])))
+
+    def test_math_model_has_no_unknown_or_approximate_for_registered_classes(self):
+        module_classes = [
+            "Root",
+            "FK",
+            "FKSegment",
+            "IK",
+            "Limb",
+            "QuadLimb",
+            "Hand",
+            "Floating",
+            "PointTarget",
+            "Lips",
+            "FollicleEye",
+            "RibbonBindIK",
+            "TestMotionModule",
+        ]
+        for module_class in module_classes:
+            model = _build_module_math_model(
+                {
+                    "module_name": f"Test_{module_class}",
+                    "module_class": module_class,
+                    "module_settings": {},
+                    "controls": [],
+                    "proxies": [],
+                    "metadata": {},
+                }
+            )
+            self.assertNotEqual(model.get("implementation_status"), "unknown", module_class)
+            self.assertNotEqual(model.get("implementation_status"), "approximate", module_class)
+
+    def test_apply_behavior_graph_to_control_rig_runs_through_controller_api(self):
+        payload = {
+            "rig_name": "GraphRig",
+            "modules": [
+                {
+                    "module_name": "M_Spine",
+                    "module_class": "FK",
+                    "proxies": [
+                        {"name": "Start", "parent": None, "position": [0, 0, 0], "rotation": [0, 0, 0]},
+                        {"name": "End", "parent": "Start", "position": [0, 9, 0], "rotation": [0, 0, 0]},
+                    ],
+                    "controls": [],
+                    "module_settings": {"segments": 2, "ctrl_scale": [1, 1, 1]},
+                }
+            ],
+        }
+        materialized = augment_payload_with_generated_controls(payload)
+
+        class _Controller:
+            def add_unit_node_from_struct_path(self, *args):
+                return object()
+
+            def set_pin_default_value(self, *args):
+                return True
+
+            def add_link(self, *args):
+                return True
+
+        controller = _Controller()
+        control_rig = object()
+        with mock.patch("rigsys.translation.unreal_builder._get_rigvm_controller", return_value=controller), mock.patch(
+            "rigsys.translation.unreal_builder._controller_add_unit_node", return_value=object()
+        ), mock.patch(
+            "rigsys.translation.unreal_builder._controller_set_pin_default_with_candidates", return_value=True
+        ), mock.patch("rigsys.translation.unreal_builder._controller_add_link", return_value=True):
+            result = apply_behavior_graph_to_control_rig(control_rig, materialized)
+
+        self.assertGreater(result.get("nodes_added", 0), 0)
+        self.assertGreater(result.get("links_added", 0), 0)
+        self.assertGreater(result.get("defaults_set", 0), 0)
+        self.assertEqual(result.get("warnings"), [])
+
+    def test_graph_plan_fk_segment_and_follicle_lips_distribution_nodes(self):
+        payload = {
+            "rig_name": "GraphRig",
+            "modules": [
+                {
+                    "module_name": "M_FKSeg",
+                    "module_class": "FKSegment",
+                    "proxies": [
+                        {"name": "Start", "parent": None, "position": [0, 0, 0], "rotation": [0, 0, 0]},
+                        {"name": "1", "parent": "Start", "position": [0, 2, 0], "rotation": [0, 0, 0]},
+                        {"name": "End", "parent": "1", "position": [0, 4, 0], "rotation": [0, 0, 0]},
+                        {"name": "UpVector", "parent": "Start", "position": [0, 0, -2], "rotation": [0, 0, 0]},
+                    ],
+                    "controls": [],
+                    "module_settings": {
+                        "segments": 3,
+                        "ik_rail": True,
+                        "ctrl_scale": [1, 1, 1],
+                    },
+                },
+                {
+                    "module_name": "M_Lips",
+                    "module_class": "Lips",
+                    "proxies": [
+                        {"name": "Mouth", "parent": None, "position": [0, 0, 0], "rotation": [0, 0, 0]},
+                        {"name": "L_CornerLip", "parent": "Mouth", "position": [2, 0, 0], "rotation": [0, 0, 0]},
+                        {"name": "R_CornerLip", "parent": "Mouth", "position": [-2, 0, 0], "rotation": [0, 0, 0]},
+                        {"name": "M_UpLip", "parent": "Mouth", "position": [0, 1, 0], "rotation": [0, 0, 0]},
+                        {"name": "M_LoLip", "parent": "Mouth", "position": [0, -1, 0], "rotation": [0, 0, 0]},
+                    ],
+                    "controls": [],
+                    "module_settings": {
+                        "lip_segments": 2,
+                        "ctrl_scale": [1, 1, 1],
+                    },
+                },
+                {
+                    "module_name": "L_Eye",
+                    "module_class": "FollicleEye",
+                    "proxies": [
+                        {"name": "Eyeball", "parent": None, "position": [1, 2, 3], "rotation": [0, 0, 0]},
+                        {"name": "In", "parent": "Eyeball", "position": [2, 2, 3], "rotation": [0, 0, 0]},
+                        {"name": "Out", "parent": "Eyeball", "position": [0, 2, 3], "rotation": [0, 0, 0]},
+                        {"name": "Up", "parent": "Eyeball", "position": [1, 2.4, 3], "rotation": [0, 0, 0]},
+                        {"name": "Lo", "parent": "Eyeball", "position": [1, 1.6, 3], "rotation": [0, 0, 0]},
+                    ],
+                    "controls": [],
+                    "module_settings": {
+                        "lid_segments": 2,
+                        "follicle_surface": "faceSurface",
+                        "ctrl_scale": [1, 1, 1],
+                    },
+                },
+            ],
+        }
+        materialized = augment_payload_with_generated_controls(payload)
+        plan = build_behavior_graph_plan(materialized)
+        node_structs = [node["struct_path"] for node in plan["nodes"]]
+        node_names = [node["name"] for node in plan["nodes"]]
+
+        self.assertTrue(any("MathVectorSub" in path for path in node_structs))
+        self.assertTrue(any("MathVectorMul" in path for path in node_structs))
+        self.assertTrue(any("MathVectorAdd" in path for path in node_structs))
+        self.assertTrue(any("FKSegmentAlphaMul" in name for name in node_names))
+        self.assertTrue(any("LipsUpperAlphaMul" in name or "LipsLowerAlphaMul" in name for name in node_names))
+        self.assertTrue(any("LidUpperAlphaMul" in name or "LidLowerAlphaMul" in name for name in node_names))
+
+        model_by_class = {model.get("module_class"): model for model in plan["math_models"]}
+        self.assertEqual(model_by_class["FKSegment"].get("implementation_status"), "implemented")
+        self.assertEqual(model_by_class["Lips"].get("implementation_status"), "implemented")
+        self.assertEqual(model_by_class["FollicleEye"].get("implementation_status"), "implemented")
 
