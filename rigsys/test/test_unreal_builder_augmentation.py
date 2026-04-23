@@ -1076,3 +1076,47 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         self.assertEqual(factory_calls, [requested_path])
         self.assertEqual(fake_editor.saved[-1][0], requested_path)
 
+    def test_controller_add_unit_node_uses_keyword_signature_when_available(self):
+        class _FakeVector2D:
+            def __init__(self, x, y):
+                self.x = x
+                self.y = y
+
+        class _FakeController:
+            def __init__(self):
+                self.calls = []
+
+            def add_unit_node_from_struct_path(self, *args, **kwargs):
+                if kwargs:
+                    self.calls.append(("kwargs", kwargs))
+                    return object()
+                self.calls.append(("args", args))
+                raise RuntimeError("Unexpected positional call")
+
+        class _FakeUnreal:
+            Vector2D = _FakeVector2D
+
+        from rigsys.translation.unreal_builder import _controller_add_unit_node
+
+        controller = _FakeController()
+        node_spec = {
+            "position": [12.0, 24.0],
+            "struct_path": "/Script/RigVM.RigVMFunction_MathDoubleAdd",
+            "method_name": "Execute",
+            "name": "TestNode",
+        }
+
+        with mock.patch("rigsys.translation.unreal_builder._load_unreal", return_value=_FakeUnreal):
+            created = _controller_add_unit_node(controller, node_spec)
+
+        self.assertIsNotNone(created)
+        self.assertEqual(len(controller.calls), 1)
+        call_kind, call_payload = controller.calls[0]
+        self.assertEqual(call_kind, "kwargs")
+        self.assertEqual(
+            call_payload.get("script_struct_path", call_payload.get("struct_path")),
+            node_spec["struct_path"],
+        )
+        self.assertEqual(call_payload["method_name"], node_spec["method_name"])
+        self.assertEqual(call_payload["node_name"], node_spec["name"])
+

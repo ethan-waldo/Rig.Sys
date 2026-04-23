@@ -3055,18 +3055,48 @@ def _controller_add_unit_node(controller, node_spec: Dict[str, Any]) -> Any:
     method_name = node_spec.get("method_name", "Execute")
     node_name = node_spec["name"]
 
+    # Keep fallbacks strict to avoid invoking ambiguous positional signatures.
+    # Some UE Python bindings can crash editor-native code when argument ordering
+    # is invalid but still marshaled across the C++ boundary.
     call_variants = [
-        (struct_path, method_name, position, node_name, True, False),
-        (struct_path, method_name, position, node_name, True),
-        (struct_path, method_name, position, node_name),
-        (struct_path, position, node_name, True, False),
-        (struct_path, position, node_name, True),
-        (struct_path, position, node_name),
+        (
+            tuple(),
+            {
+                "struct_path": struct_path,
+                "method_name": method_name,
+                "position": position,
+                "node_name": node_name,
+                "setup_undo_redo": True,
+                "print_python_command": False,
+            },
+        ),
+        (
+            tuple(),
+            {
+                "struct_path": struct_path,
+                "method_name": method_name,
+                "position": position,
+                "node_name": node_name,
+                "setup_undo_redo": True,
+            },
+        ),
+        (
+            tuple(),
+            {
+                "struct_path": struct_path,
+                "method_name": method_name,
+                "position": position,
+                "node_name": node_name,
+            },
+        ),
+        ((struct_path, method_name, position, node_name, True, False), {}),
+        ((struct_path, method_name, position, node_name, True), {}),
+        ((struct_path, method_name, position, node_name), {}),
     ]
     last_error: Optional[Exception] = None
-    for args in call_variants:
+    for args, kwargs in call_variants:
         try:
-            return add_unit(*args)
+            return add_unit(*args, **kwargs)
         except Exception as exc:
             last_error = exc
     if last_error is not None:
