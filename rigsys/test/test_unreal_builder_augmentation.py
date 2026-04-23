@@ -1185,6 +1185,42 @@ class TestUnrealBuilderAugmentation(unittest.TestCase):
         self.assertIn("parent", kwargs)
         self.assertIn("transform", kwargs)
 
+    def test_transform_from_trs_prefers_rotator_over_quaternion(self):
+        class _FakeVector:
+            def __init__(self, x, y, z):
+                self.x, self.y, self.z = x, y, z
+
+        class _FakeRotator:
+            def __init__(self, rx, ry, rz):
+                self.rx, self.ry, self.rz = rx, ry, rz
+                self.quaternion_called = False
+
+            def quaternion(self):
+                self.quaternion_called = True
+                return object()
+
+        class _FakeTransform:
+            def __init__(self, location=None, rotation=None, scale=None):
+                self.location = location
+                self.rotation = rotation
+                self.scale = scale
+
+        class _FakeUnreal:
+            Vector = _FakeVector
+            Rotator = _FakeRotator
+            Transform = _FakeTransform
+
+        from rigsys.translation.unreal_builder import _transform_from_trs
+
+        with mock.patch("rigsys.translation.unreal_builder._load_unreal", return_value=_FakeUnreal):
+            transform = _transform_from_trs(
+                position=[1.0, 2.0, 3.0],
+                rotation=[10.0, 20.0, 30.0],
+                scale=[1.0, 1.0, 1.0],
+            )
+
+        self.assertIsInstance(transform.rotation, _FakeRotator)
+
     def test_add_bone_if_missing_supports_hierarchy_without_get_bone_key(self):
         class _FakeHierarchyController:
             def __init__(self):

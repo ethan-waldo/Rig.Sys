@@ -37,6 +37,41 @@ def _rotator_from_list(values: Iterable[float]):
     return unreal.Rotator(rx, ry, rz)
 
 
+def _transform_from_trs(
+    *,
+    position: Iterable[float],
+    rotation: Iterable[float],
+    scale: Iterable[float],
+):
+    """Build a Transform across Unreal API variants."""
+    unreal = _load_unreal()
+    location = _vector_from_list(position)
+    rotator = _rotator_from_list(rotation)
+    scale_vector = _vector_from_list(scale)
+
+    call_variants = [
+        {
+            "location": location,
+            "rotation": rotator,
+            "scale": scale_vector,
+        },
+        {
+            "location": location,
+            "rotation": rotator.quaternion(),
+            "scale": scale_vector,
+        },
+    ]
+    last_error: Optional[Exception] = None
+    for kwargs in call_variants:
+        try:
+            return unreal.Transform(**kwargs)
+        except Exception as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Failed to construct Unreal Transform")
+
+
 def _vec(values: Optional[Iterable[float]], default: Optional[List[float]] = None) -> List[float]:
     if values is None:
         return list(default or [0.0, 0.0, 0.0])
