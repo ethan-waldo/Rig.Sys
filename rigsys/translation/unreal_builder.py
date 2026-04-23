@@ -3311,7 +3311,7 @@ def _asset_object_path(asset: Any) -> Optional[str]:
 
 
 def create_control_rig_asset(package_path: str, asset_name: str, skeletal_mesh_path: str) -> str:
-    """Create or replace a Control Rig asset bound to skeletal mesh."""
+    """Create or load a Control Rig asset bound to skeletal mesh."""
     unreal = _load_unreal()
     package = package_path.rstrip("/")
     if not package.startswith("/Game"):
@@ -3319,12 +3319,20 @@ def create_control_rig_asset(package_path: str, asset_name: str, skeletal_mesh_p
 
     name = _safe_name(asset_name)
     control_rig_path = f"{package}/{name}"
-    if unreal.EditorAssetLibrary.does_asset_exist(control_rig_path):
-        unreal.EditorAssetLibrary.delete_asset(control_rig_path)
 
     skeletal_mesh = unreal.EditorAssetLibrary.load_asset(skeletal_mesh_path)
     if skeletal_mesh is None:
         raise RuntimeError(f"Could not load skeletal mesh: {skeletal_mesh_path}")
+
+    existing_asset = None
+    if unreal.EditorAssetLibrary.does_asset_exist(control_rig_path):
+        existing_asset = unreal.EditorAssetLibrary.load_asset(control_rig_path)
+    if existing_asset is not None:
+        set_preview_mesh = getattr(existing_asset, "set_preview_mesh", None)
+        if callable(set_preview_mesh):
+            set_preview_mesh(skeletal_mesh)
+        unreal.EditorAssetLibrary.save_asset(control_rig_path, only_if_is_dirty=False)
+        return control_rig_path
 
     factory = unreal.ControlRigBlueprintFactory
     skeleton = getattr(skeletal_mesh, "skeleton", None)
@@ -3373,24 +3381,24 @@ def create_control_rig_asset(package_path: str, asset_name: str, skeletal_mesh_p
         raise RuntimeError(f"Failed to create Control Rig asset at {control_rig_path}")
 
     created_path = _asset_object_path(control_rig_asset)
+    final_control_rig_path = control_rig_path
     if created_path and created_path != control_rig_path:
         rename_asset = getattr(unreal.EditorAssetLibrary, "rename_asset", None)
-        if not callable(rename_asset):
-            raise RuntimeError(
-                f"Control Rig was created at {created_path}; rename API is unavailable "
-                f"for requested path {control_rig_path}"
-            )
-        if unreal.EditorAssetLibrary.does_asset_exist(control_rig_path):
-            unreal.EditorAssetLibrary.delete_asset(control_rig_path)
-        if not rename_asset(created_path, control_rig_path):
-            raise RuntimeError(f"Failed to rename Control Rig asset from {created_path} to {control_rig_path}")
-        control_rig_asset = unreal.EditorAssetLibrary.load_asset(control_rig_path) or control_rig_asset
+        # Avoid force-delete / replacement flows; they can destabilize some editor sessions.
+        if callable(rename_asset) and not unreal.EditorAssetLibrary.does_asset_exist(control_rig_path):
+            if rename_asset(created_path, control_rig_path):
+                final_control_rig_path = control_rig_path
+            else:
+                final_control_rig_path = created_path
+        else:
+            final_control_rig_path = created_path
+        control_rig_asset = unreal.EditorAssetLibrary.load_asset(final_control_rig_path) or control_rig_asset
 
     set_preview_mesh = getattr(control_rig_asset, "set_preview_mesh", None)
     if callable(set_preview_mesh):
         set_preview_mesh(skeletal_mesh)
-    unreal.EditorAssetLibrary.save_asset(control_rig_path, only_if_is_dirty=False)
-    return control_rig_path
+    unreal.EditorAssetLibrary.save_asset(final_control_rig_path, only_if_is_dirty=False)
+    return final_control_rig_path
 
 
 def _add_bone_if_missing(hierarchy, parent: str, name: str, position: List[float], rotation: List[float]):
@@ -3526,27 +3534,8 @@ def _add_control_if_missing(hierarchy, parent_control: Optional[str], control: D
             raise last_error
         return
 
-    # Optional post-create transform staging. API varies by UE version; failures are non-fatal.
-    set_control_offset = getattr(hierarchy, "set_control_offset_transform", None)
-    if callable(set_control_offset):
-        offset_variants = [
-            ((hierarchy.get_control_key(control_name), initial_transform, True), {}),
-            ((hierarchy.get_control_key(control_name), initial_transform), {}),
-            (
-                tuple(),
-                {
-                    "key": hierarchy.get_control_key(control_name),
-                    "transform": initial_transform,
-                    "initial": True,
-                },
-            ),
-        ]
-        for args, kwargs in offset_variants:
-            try:
-                set_control_offset(*args, **kwargs)
-                break
-            except Exception:
-                continue
+    # Note: offset/shape post-mutation calls are intentionally skipped for stability.
+    # Some Unreal builds expose variant signatures that can trigger native instability.
 
 
 def build_control_rig_from_payload(
